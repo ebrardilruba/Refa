@@ -1,14 +1,27 @@
 plugins {
     id("com.android.application")
+    id("com.google.gms.google-services")     // Firebase Google Services
     id("kotlin-android")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
 
 android {
-    namespace = "com.refa.app"
+    namespace = "com.ebrardilruba.refa"
+
+    // Flutter tarafından sağlanan SDK sürümleri
     compileSdk = flutter.compileSdkVersion
+
+    // NDK (senin projen böyle kullanıyor)
     ndkVersion = "27.0.12077973"
+
+    defaultConfig {
+        applicationId = "com.ebrardilruba.refa"
+        minSdk = 23
+        targetSdk = flutter.targetSdkVersion
+        versionCode = flutter.versionCode
+        versionName = flutter.versionName
+    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -20,18 +33,7 @@ android {
         jvmTarget = "17"
     }
 
-    defaultConfig {
-        // Application ID
-        applicationId = "com.refa.app"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = 23
-        targetSdk = flutter.targetSdkVersion
-        versionCode = flutter.versionCode
-        versionName = flutter.versionName
-    }
-
-    // Strip'i kapat: .so'larda sembolleri koru
+    // .so sembollerini koru (senin ayarın)
     packaging {
         jniLibs {
             keepDebugSymbols += setOf("**/*.so")
@@ -40,14 +42,12 @@ android {
 
     buildTypes {
         debug {
-            ndk {
-                debugSymbolLevel = "NONE"
-            }
+            ndk { debugSymbolLevel = "NONE" }
         }
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
+            // mağazaya çıkarken kendi imzanı koy
             signingConfig = signingConfigs.getByName("debug")
+            // istersen minify/proguard vb. burada açarsın
         }
     }
 }

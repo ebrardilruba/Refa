@@ -2,6 +2,9 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
 
+// Splash (sesli+yazılı hoş geldiniz)
+import 'welcome_splash.dart';
+
 // GERÇEK SAYFALAR – alias ile bağla
 import 'today.dart' as today;        // today.TodayPage
 import 'reminders.dart' as rem;      // rem.RemindersPage
@@ -35,7 +38,11 @@ class RefaApp extends StatelessWidget {
           onSurface: Colors.black,
         ),
       ),
-      home: const RefaHomePage(),
+      // İlk açılışta Splash göster
+      home: const WelcomeSplash(),
+      routes: {
+        '/home': (_) => const RefaHomePage(),
+      },
     );
   }
 }
@@ -87,11 +94,9 @@ class _RefaHomePageState extends State<RefaHomePage> {
         nav.push(MaterialPageRoute(builder: (_) => const rem.RemindersPage()));
         break;
       case 'reports':
-        // Tahliller (PDF) -> Enabiz sayfası
         nav.push(MaterialPageRoute(builder: (_) => const enb.EnabizPage()));
         break;
       case 'voice':
-        // GERÇEK Sesli Bot sayfası
         nav.push(MaterialPageRoute(builder: (_) => const voice.VoiceBotPage()));
         break;
       case 'memory':
@@ -281,6 +286,7 @@ class _GlassCard extends StatelessWidget {
       borderRadius: BorderRadius.circular(20),
       child: Stack(
         children: [
+          // DÜZELTİLDİ: Positioned.fill
           Positioned.fill(
             child: BackdropFilter(
               filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
@@ -305,6 +311,4 @@ class _GlassCard extends StatelessWidget {
       ),
     );
   }
-
-  
-}
+}  

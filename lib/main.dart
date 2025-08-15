@@ -1,11 +1,20 @@
-﻿import 'package:flutter/material.dart';
+﻿// lib/main.dart
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'app.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'firebase_options.dart';
 
-void main() {
+import 'auth_gate.dart'; // oturum varsa RefaApp, yoksa PhoneAuthPage
+
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Koyu arka plana uygun status/nav bar
+  // Firebase
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
+
+  // Koyu arka plana uygun sistem çubuğu
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
     statusBarColor: Colors.transparent,
     statusBarIconBrightness: Brightness.light, // Android
@@ -14,8 +23,8 @@ void main() {
     systemNavigationBarIconBrightness: Brightness.light,
   ));
 
-  // (İstersen portreye kilitle)
-  // SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+  // Portreye kilitlemek istersen:
+  // await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
 
-  runApp(const RefaApp());
+  runApp(const AuthGate());
 }

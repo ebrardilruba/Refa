@@ -167,7 +167,7 @@ class _MemoryGamePageState extends State<MemoryGamePage> {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    'Eşleştir ve ilerle • Seviye $level',
+                    'Eşleştir ve İlerle • Seviye $level',
                     style: TextStyle(
                       color: Colors.white.withOpacity(0.8),
                       fontSize: 16,
@@ -192,31 +192,27 @@ class _MemoryGamePageState extends State<MemoryGamePage> {
                     ),
                   ),
 
-                  const SizedBox(height: 16),
-                  _GlassControlPanel(
-                    level: level,
-                    onPrevLevel: level > 1 ? _prevLevel : null,
-                    onResetLevel: _resetSameLevel,
-                    onNextLevel: _nextLevel,
-                  ),
+                  // AŞAĞIDAKİ İKİ SATIRI SİLDİK/KALDIRDIK:
+                  // const SizedBox(height: 16),
+                  // _GlassControlPanel(...),
                 ],
               ),
             ),
           ),
 
-          // home indicator fake
-          Positioned(
-            bottom: 8, left: 0, right: 0,
-            child: Center(
-              child: Container(
-                width: 144, height: 4,
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.20),
-                  borderRadius: BorderRadius.circular(999),
-                ),
-              ),
-            ),
-          ),
+          // AŞAĞIDAKİ home indicator fake BLOĞUNU TAMAMEN KALDIRDIK:
+          // Positioned(
+          //   bottom: 8, left: 0, right: 0,
+          //   child: Center(
+          //     child: Container(
+          //       width: 144, height: 4,
+          //       decoration: BoxDecoration(
+          //         color: Colors.white.withOpacity(0.20),
+          //         borderRadius: BorderRadius.circular(999),
+          //       ),
+          //     ),
+          //   ),
+          // ),
         ],
       ),
     );
@@ -277,69 +273,8 @@ class _GlassHeader extends StatelessWidget {
   }
 }
 
-class _GlassControlPanel extends StatelessWidget {
-  final int level;
-  final VoidCallback? onPrevLevel;
-  final VoidCallback onResetLevel;
-  final VoidCallback onNextLevel;
-
-  const _GlassControlPanel({
-    required this.level,
-    this.onPrevLevel,
-    required this.onResetLevel,
-    required this.onNextLevel,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(20),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-        child: Container(
-          decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.15),
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: Colors.white.withOpacity(0.30), width: 1),
-            boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 12, offset: Offset(0, 6))],
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: [
-              _ControlButton(icon: Icons.chevron_left_rounded, onTap: onPrevLevel, enabled: onPrevLevel != null),
-              _ControlButton(icon: Icons.refresh_rounded, onTap: onResetLevel, enabled: true),
-              _ControlButton(icon: Icons.chevron_right_rounded, onTap: onNextLevel, enabled: true),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _ControlButton extends StatelessWidget {
-  final IconData icon;
-  final VoidCallback? onTap;
-  final bool enabled;
-
-  const _ControlButton({required this.icon, this.onTap, required this.enabled});
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: enabled ? onTap : null,
-      child: Container(
-        width: 48, height: 48,
-        decoration: BoxDecoration(
-          color: enabled ? Colors.white.withOpacity(0.20) : Colors.white.withOpacity(0.05),
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Icon(icon, color: enabled ? Colors.white : Colors.white.withOpacity(0.3), size: 24),
-      ),
-    );
-  }
-}
+// _GlassControlPanel ve _ControlButton TANIMLARI ARTIK KULLANILMIYOR.
+// İstersen tamamen silebilirsin. Aşağıdaki kart/oyun kodu aynen kalsın.
 
 class _MemoryCard extends StatelessWidget {
   final _CardModel model;

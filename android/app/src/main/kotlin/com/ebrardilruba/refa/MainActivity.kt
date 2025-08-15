@@ -1,4 +1,4 @@
-package com.refa.app
+package com.ebrardilruba.refa
 
 import io.flutter.embedding.android.FlutterActivity
 
