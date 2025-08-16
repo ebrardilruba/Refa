@@ -1,0 +1,124 @@
+# =========================
+# GENEL / ORTAK ÇÖPLÜKLER
+# =========================
+*.class
+*.log
+*.pyc
+*.swp
+*.tmp
+*.bak
+*.orig
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+migrate_working_dir/
+
+# FVM (Flutter Version Manager)
+.fvm/
+
+# =========================
+# IDE / EDITOR
+# =========================
+# IntelliJ / Android Studio
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# VS Code (istersen takip edebilirsin)
+#.vscode/
+
+# =========================
+# DART / FLUTTER
+# =========================
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+.flutter-plugins
+.flutter-plugins-dependencies
+**/doc/api/
+build/
+coverage/
+
+# Uygulama reposunda pubspec.lock'u takip et (ÖNERİLEN)
+# Paket geliştiriyorsan aşağıdakini açıp ignore edebilirsin:
+# pubspec.lock
+
+# Web için oluşturulan auto file
+lib/generated_plugin_registrant.dart
+
+# =========================
+# ANDROID
+# =========================
+/android/.gradle/
+**/local.properties
+**/key.properties
+
+# Keystore dosyalarını asla commit etme
+**/*.jks
+**/*.keystore
+
+# Android Studio build varyant klasörleri (ekstra güvence)
+/android/app/debug/
+/android/app/profile/
+/android/app/release/
+
+# (Firebase dosyalarını gizli tutmak istiyorsan yorumdan çıkar)
+# android/app/google-services.json
+
+# =========================
+# iOS
+# =========================
+# CocoaPods
+ios/Pods/
+# iOS build ara çıktıları
+ios/.symlinks/
+ios/Flutter/.last_build_id
+ios/Flutter/ephemeral/
+# Xcode kullanıcıya özel dosyalar
+**/xcuserdata/
+# DerivedData (global, proje dışına da koyabilir)
+# DerivedData/
+
+# (Firebase dosyalarını gizli tutmak istiyorsan yorumdan çıkar)
+# ios/Runner/GoogleService-Info.plist
+
+# Flutter, bu podspec'in izlenmesine izin verir (default'ta sorun yok)
+# !ios/Flutter/Flutter.podspec
+
+# =========================
+# MACOS
+# =========================
+macos/Flutter/ephemeral/
+macos/Pods/
+**/xcuserdata/
+
+# =========================
+# WINDOWS
+# =========================
+windows/flutter/ephemeral/
+
+# =========================
+# LINUX
+# =========================
+linux/flutter/ephemeral/
+
+# =========================
+# WEB
+# =========================
+# build/ zaten yukarıda
+
+# =========================
+# SİMGELEME / KARARTMA
+# =========================
+app.*.symbols
+app.*.map.json
+
+# =========================
+# SWIFTPM (iOS/macOS)
+# =========================
+.swiftpm/
