@@ -117,11 +117,9 @@ class EnhancedVoiceService {
 
       await _tts!.awaitSpeakCompletion(true);
 
-      // Platforma göre ses motoru/kanal ayarları
       if (!kIsWeb) {
         if (Platform.isIOS) {
           try {
-            // iOS: paylaşılan instance ve ses kategorisi
             await _tts!.setSharedInstance(true).catchError((_) {});
             await _tts!.setIosAudioCategory(
               IosTextToSpeechAudioCategory.playback,
@@ -144,10 +142,7 @@ class EnhancedVoiceService {
         }
       }
 
-      // Ses yüksekliği
       await _tts!.setVolume(1.0).catchError((_) {});
-
-      // Dil/voice uygunluk kontrolü + fallback
       await _ensureLanguageAndVoiceAvailable();
 
       _tts!.setStartHandler(() {
@@ -175,7 +170,6 @@ class EnhancedVoiceService {
   Future<void> _ensureLanguageAndVoiceAvailable() async {
     if (_tts == null) return;
     try {
-      // --- Dil fallback ---
       final langs = await _tts!.getLanguages;
       if (langs is Iterable) {
         final list = List<String>.from(langs.map((e) => e.toString()));
@@ -186,11 +180,9 @@ class EnhancedVoiceService {
       }
       await _tts!.setLanguage(_lang);
 
-      // --- Voice seçimi (FIX: Map<String,String> ver) ---
       final dynVoices = await _tts!.getVoices;
       if (dynVoices is Iterable) {
         final voices = dynVoices.map((v) => Map<String, dynamic>.from(v)).toList();
-        // locale/name 'tr' ile başlayan ilk voice
         Map<String, dynamic>? pick;
         for (final m in voices) {
           final loc = (m['locale'] ?? m['name'] ?? '').toString().toLowerCase();
@@ -265,20 +257,17 @@ class EnhancedVoiceService {
         return;
       }
 
-      // Dinleme açıksa kapat
       if (_isListening) {
         await stopListening();
         await Future.delayed(const Duration(milliseconds: 150));
       }
 
-      // Devam eden konuşmayı kes
       await stopSpeaking();
       await Future.delayed(const Duration(milliseconds: 150));
 
       await _applyTtsSettings();
 
       final cleanedText = _enhancedTextCleaning(text);
-      // Temizlik sonrası boş kaldıysa orijinali konuş
       final toSpeak = cleanedText.trim().isEmpty ? text.trim() : cleanedText.trim();
       if (toSpeak.isEmpty) return;
 
@@ -318,7 +307,6 @@ class EnhancedVoiceService {
     if (_sttInited) return;
 
     try {
-      // Mikrofon izni
       final permission = await Permission.microphone.status;
       if (permission.isDenied) {
         final result = await Permission.microphone.request();
@@ -340,19 +328,20 @@ class EnhancedVoiceService {
         _sttInited = true;
         _updateStatus('STT hazır');
 
-        // Locale seçimi: önce tr_*, yoksa ilk locale
         try {
-          final locales = await _stt!.locales(); // List<LocaleName>
+          final locales = await _stt!.locales();
           final preferred = locales.firstWhere(
             (l) => l.localeId.toLowerCase().startsWith('tr'),
             orElse: () => locales.isNotEmpty ? locales.first : LocaleName('', ''),
           );
           _selectedLocaleId = preferred.localeId.isNotEmpty ? preferred.localeId : null;
 
+          final sys = await _stt!.systemLocale();
+          debugPrint('STT system locale: ${sys?.localeId}');
           debugPrint('STT locales: ${locales.map((l) => l.localeId).toList()}');
           debugPrint('Seçilen STT locale: ${_selectedLocaleId ?? "(varsayılan)"}');
         } catch (e) {
-          _selectedLocaleId = null; // sistem varsayılanı
+          _selectedLocaleId = null;
           debugPrint('Locale seçimi hatası: $e');
         }
       } else {
@@ -388,8 +377,8 @@ class EnhancedVoiceService {
   }
 
   Future<void> startListening({
-    Duration timeout = const Duration(seconds: 30),
-    Duration pauseFor = const Duration(seconds: 3),
+    Duration timeout = const Duration(seconds: 45),
+    Duration pauseFor = const Duration(seconds: 6),
   }) async {
     try {
       if (!_sttInited) {
@@ -405,7 +394,6 @@ class EnhancedVoiceService {
         await Future.delayed(const Duration(milliseconds: 200));
       }
 
-      // TTS konuşuyorsa sustur
       if (_isSpeaking) {
         await stopSpeaking();
         await Future.delayed(const Duration(milliseconds: 300));
@@ -421,10 +409,9 @@ class EnhancedVoiceService {
         listenFor: timeout,
         pauseFor: pauseFor,
         partialResults: true,
-        // Sabit "tr-TR" YOK → seçilen locale (null ise sistem varsayılanı)
         localeId: _selectedLocaleId,
         cancelOnError: true,
-        listenMode: ListenMode.confirmation,
+        listenMode: ListenMode.dictation,
       );
 
       if (started) {
@@ -562,12 +549,12 @@ class EnhancedVoiceService {
   String _fixRepeatingChars(String text) {
     const vowels = 'aeıioöuüAEIİOÖUÜ';
     return text.replaceAllMapped(
-      RegExp(r'(\w)\1{2,}', caseSensitive: false),
+      RegExp(r'([A-Za-zÇĞİÖŞÜçğıöşü0-9])\1{2,}', caseSensitive: false),
       (match) {
         final char = match.group(1)!;
         return vowels.contains(char)
-            ? '$char$char'  // sesli harflerde max 2 tekrar
-            : char;         // sessiz harfte tekil
+            ? '$char$char'
+            : char;
       },
     );
   }
@@ -581,11 +568,13 @@ class EnhancedVoiceService {
   }
 
   String _lastMinuteCheck(String text) {
-    if (text.length < 1) return text; // kısa da olsa konuştur
-    if (RegExp(r'^[^\w\s]+$').hasMatch(text)) return '';
+    if (text.isEmpty) return text;
+    // Sadece tamamen işaretlerden oluşuyorsa yut
+    if (RegExp(r'^[^A-Za-zÇĞİÖŞÜçğıöşü0-9\s]+$').hasMatch(text)) return '';
+    // Sayısal baskın metinleri, KISA ise “sayısal veri” de (uzunsa bırak)
     final digits = RegExp(r'\d').allMatches(text).length;
     final ratio = text.isEmpty ? 0.0 : digits / text.length;
-    if (ratio > 0.9) return 'sayısal veri'; // eşiği yükselttik
+    if (text.length < 12 && ratio > 0.9) return 'sayısal veri';
     return text;
   }
 
@@ -682,14 +671,14 @@ class EnhancedVoiceService {
 
     _commonFixes.forEach((wrong, correct) {
       cleaned = cleaned.replaceAll(
-        RegExp(r'\b' + RegExp.escape(wrong) + r'\b', caseSensitive: false),
+        RegExp(r'(^|[^A-Za-zÇĞİÖŞÜçğıöşü])' + RegExp.escape(wrong) + r'(?=[^A-Za-zÇĞİÖŞÜçğıöşü]|$)', caseSensitive: false),
         correct,
       );
     });
 
     _numberWords.forEach((word, number) {
       cleaned = cleaned.replaceAll(
-        RegExp(r'\b' + RegExp.escape(word) + r'\b', caseSensitive: false),
+        RegExp(r'(^|[^A-Za-zÇĞİÖŞÜçğıöşü])' + RegExp.escape(word) + r'(?=[^A-Za-zÇĞİÖŞÜçğıöşü]|$)', caseSensitive: false),
         number,
       );
     });
@@ -698,8 +687,7 @@ class EnhancedVoiceService {
     cleaned = _addBasicPunctuation(cleaned);
 
     if (cleaned.isNotEmpty) {
-      cleaned = cleaned[0].toUpperCase() +
-          (cleaned.length > 1 ? cleaned.substring(1) : '');
+      cleaned = cleaned[0].toUpperCase() + (cleaned.length > 1 ? cleaned.substring(1) : '');
     }
     return cleaned;
   }
@@ -709,17 +697,14 @@ class EnhancedVoiceService {
     return text.replaceAllMapped(regex, (match) {
       final hour = match.group(1)!;
       final minuteWord = match.group(2)!.toLowerCase();
-      const minuteMap = {
-        'otuz': '30', 'on': '10', 'yirmi': '20', 'elli': '50', 'kırk': '40'
-      };
+      const minuteMap = {'otuz': '30', 'on': '10', 'yirmi': '20', 'elli': '50', 'kırk': '40'};
       final minute = minuteMap[minuteWord] ?? '00';
       return '$hour:$minute';
     });
   }
 
   String _addBasicPunctuation(String text) {
-    if (RegExp(r'^(ne|nasıl|neden|nerede|kim|hangi|kaç)', caseSensitive: false)
-        .hasMatch(text)) {
+    if (RegExp(r'^(ne|nasıl|neden|nerede|kim|hangi|kaç)', caseSensitive: false).hasMatch(text)) {
       if (!text.endsWith('?')) {
         text += '?';
       }

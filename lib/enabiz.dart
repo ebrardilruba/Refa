@@ -1,4 +1,5 @@
-// lib/enabiz.dart
+// lib/enabiz.dart — Sertleştirilmiş e-Nabız PDF analiz ekranı (düzeltilmiş)
+
 import 'dart:async' show unawaited;
 import 'dart:io';
 import 'dart:typed_data';
@@ -6,17 +7,15 @@ import 'dart:ui';
 
 import 'package:flutter/foundation.dart'; // compute()
 import 'package:flutter/material.dart';
-import 'package:file_selector/file_selector.dart';
 
 import 'package:syncfusion_flutter_pdf/pdf.dart';
 import 'package:pdfx/pdfx.dart' as pdfx; // OCR rasterize
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart'; // OCR
+import 'package:file_picker/file_picker.dart'; // file_picker
 
 import 'tts_service.dart';
 import 'settings.dart';
 import 'lab_analyzer.dart';
-import 'package:refa/tts_service.dart'; // ya da: import 'tts_service.dart';
-import 'dart:async'; // unawaited kullanıyorsan gerekli
 
 // ===================== ISOLATE FONKSİYONLARI =====================
 
@@ -26,7 +25,8 @@ Future<String> _extractTextInIsolate(Uint8List bytes) async {
   final extractor = PdfTextExtractor(doc);
   final sb = StringBuffer();
   for (var i = 0; i < doc.pages.count; i++) {
-    sb.writeln(extractor.extractText(startPageIndex: i, endPageIndex: i));
+    final chunk = extractor.extractText(startPageIndex: i, endPageIndex: i);
+    if (chunk.isNotEmpty) sb.writeln(chunk);
   }
   doc.dispose();
   return _normalize(sb.toString());
@@ -34,14 +34,15 @@ Future<String> _extractTextInIsolate(Uint8List bytes) async {
 
 // 2) OCR: ilk N sayfayı PNG'e render edip ML Kit'le oku (fallback)
 Future<String> _ocrFirstPages(Uint8List bytes, {int pages = 2}) async {
-  final doc = await pdfx.PdfDocument.openData(bytes);
-  final pageCount = doc.pagesCount;
-  final limit = pages < pageCount ? pages : pageCount;
-
+  pdfx.PdfDocument? doc;
   final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
   final sb = StringBuffer();
 
   try {
+    doc = await pdfx.PdfDocument.openData(bytes);
+    final pageCount = doc.pagesCount;
+    final limit = pages < pageCount ? pages : pageCount;
+
     for (var i = 1; i <= limit; i++) {
       final page = await doc.getPage(i);
       try {
@@ -58,16 +59,18 @@ Future<String> _ocrFirstPages(Uint8List bytes, {int pages = 2}) async {
 
         final input = InputImage.fromFilePath(pngFile.path);
         final result = await recognizer.processImage(input);
-        sb.writeln(result.text);
+        if (result.text.isNotEmpty) sb.writeln(result.text);
 
         unawaited(pngFile.delete());
       } finally {
         await page.close();
       }
     }
+  } catch (e, st) {
+    debugPrint('OCR error: $e\n$st');
   } finally {
     await recognizer.close();
-    await doc.close();
+    await doc?.close();
   }
 
   return _normalize(sb.toString());
@@ -108,16 +111,35 @@ Future<List<Map<String, dynamic>>> _parseInIsolate(String text) async {
   }).toList();
 }
 
-// Metin normalizasyonu
-String _normalize(String raw) => raw
-    .replaceAll('\u00A0', ' ') // NBSP
-    .replaceAll('\u2212', '-') // minus
-    .replaceAll('–', '-')
-    .replaceAll('—', '-')
-    .replaceAll('\r', ' ')
-    .replaceAll('\t', ' ')
-    .replaceAll(RegExp('[ ]{2,}'), ' ')
-    .trim();
+// Metin normalizasyonu (TR PDF’ler için güçlendirilmiş)
+String _normalize(String raw) {
+  var s = raw
+      .replaceAll('\u00A0', ' ')
+      .replaceAll('\u2212', '-') // minus
+      .replaceAll('–', '-')
+      .replaceAll('—', '-')
+      .replaceAll('·', ' ')
+      .replaceAll('\r', ' ')
+      .replaceAll('\t', ' ')
+      .replaceAll(RegExp('[ ]{2,}'), ' ')
+      .trim();
+
+  // µ → u (µIU/mL → uIU/mL gibi)
+  s = s.replaceAll('µ', 'u');
+
+  // 12,34 → 12.34 (ondalık virgüller)
+  s = s.replaceAllMapped(RegExp(r'(\d),(\d)'), (m) => '${m[1]}.${m[2]}');
+
+  // Birim normalizasyonları
+  s = s.replaceAll(RegExp(r'mg\s*[/\-]\s*dL', caseSensitive: false), 'mg/dL');
+  s = s.replaceAll(RegExp(r'ug\s*/\s*L', caseSensitive: false), 'ug/L');
+  s = s.replaceAll(RegExp(r'uIU\s*/\s*mL', caseSensitive: false), 'uIU/mL');
+
+  // Aralık çizgisi
+  s = s.replaceAll(RegExp(r'\s*-\s*'), ' - ');
+
+  return s;
+}
 
 // ======================== WIDGET ========================
 
@@ -134,27 +156,62 @@ class _EnabizPageState extends State<EnabizPage> {
   Uint8List? _pdfBytes;
   bool _analyzing = false;
 
+  // ---- PDF seçimi: file_picker + doğrulama ----
+  bool _looksLikePdf(Uint8List b) {
+    if (b.length < 4) return false;
+    // %PDF
+    return b[0] == 0x25 && b[1] == 0x50 && b[2] == 0x44 && b[3] == 0x46;
+  }
+
   Future<void> _pickPdf() async {
     try {
-      final group = const XTypeGroup(label: 'PDF', extensions: ['pdf']);
-      final XFile? file = await openFile(acceptedTypeGroups: [group]);
-      if (file == null) return;
+      final res = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['pdf'],
+        withData: true, // bytes iste
+      );
+      if (res == null || res.files.isEmpty) return;
 
-      final bytes = await file.readAsBytes();
-      final tmpDoc = PdfDocument(inputBytes: bytes);
-      final pages = tmpDoc.pages.count;
-      tmpDoc.dispose();
+      final f = res.files.single;
+      Uint8List? bytes = f.bytes;
+      if (bytes == null && f.path != null) {
+        bytes = await File(f.path!).readAsBytes();
+      }
+      if (bytes == null) {
+        _showSnackBar('Dosya okunamadı.', isError: true);
+        return;
+      }
+
+      if (!_looksLikePdf(bytes)) {
+        _showSnackBar('Seçilen dosya PDF değil (%PDF imzası yok).', isError: true);
+        return;
+      }
+
+      // Şifreli PDF kontrolü + sayfa sayısı
+      int pages = 0;
+      try {
+        final tmpDoc = PdfDocument(inputBytes: bytes /*, password: ''*/);
+        pages = tmpDoc.pages.count;
+        tmpDoc.dispose();
+      } catch (e) {
+        // Syncfusion bazı sürümlerde özel tip export etmiyor → genel catch
+        final msg = e.toString().toLowerCase();
+        if (msg.contains('encrypt') || msg.contains('password')) {
+          _showSnackBar('Şifreli PDF. e-Nabız’dan şifresiz export al.', isError: true);
+          return;
+        }
+        rethrow;
+      }
 
       setState(() {
-        _fileName = file.name;
+        _fileName = f.name;
         _pageCount = pages;
         _pdfBytes = bytes;
       });
 
-      if (mounted) {
-        _showSnackBar('PDF yüklendi: ${file.name} ($pages sayfa)');
-      }
-    } catch (e) {
+      if (mounted) _showSnackBar('PDF yüklendi: ${f.name} ($pages sayfa)');
+    } catch (e, st) {
+      debugPrint('Pick PDF error: $e\n$st');
       if (!mounted) return;
       _showSnackBar('PDF yüklenemedi: $e', isError: true);
     }
@@ -182,20 +239,38 @@ class _EnabizPageState extends State<EnabizPage> {
       String text = '';
       try {
         text = await compute(_extractTextInIsolate, _pdfBytes!);
-      } catch (_) {}
+        debugPrint('Syncfusion text len: ${text.length}');
+      } catch (e, st) {
+        debugPrint('Syncfusion error: $e\n$st');
+      }
 
       // --- B) OCR fallback (ilk 2 sayfa)
       if (text.isEmpty) {
         try {
           text = await _ocrFirstPages(_pdfBytes!, pages: 2);
+          debugPrint('OCR(2) text len: ${text.length}');
           if (mounted && text.isNotEmpty) {
-            _showSnackBar('OCR ile metin çıkarıldı.');
+            _showSnackBar('OCR ile metin çıkarıldı (2 sayfa).');
           }
-        } catch (_) {}
+        } catch (e, st) {
+          debugPrint('OCR(2) error: $e\n$st');
+        }
+      }
+
+      // --- C) Hâlâ yoksa OCR’i 5 sayfaya yükselt
+      if (text.isEmpty) {
+        try {
+          text = await _ocrFirstPages(_pdfBytes!, pages: 5);
+          debugPrint('OCR(5) text len: ${text.length}');
+          if (mounted && text.isNotEmpty) {
+            _showSnackBar('OCR genişletildi (5 sayfa).');
+          }
+        } catch (e, st) {
+          debugPrint('OCR(5) error: $e\n$st');
+        }
       }
 
       if (text.isEmpty) {
-        // *** ÖNEMLİ: Çift tırnak kullan ***
         await TtsService.instance.speak("Bu PDF'den metin çıkaramadım.");
         if (!mounted) return;
         _showSnackBar('Metin bulunamadı (muhtemelen görüntü tabanlı PDF).', isError: true);
@@ -203,12 +278,21 @@ class _EnabizPageState extends State<EnabizPage> {
       }
 
       // Özet için dilim
-      final summarySlice = text.length > 3000 ? text.substring(0, 3000) : text;
+      final summarySlice = text.length > 4000 ? text.substring(0, 4000) : text;
       var parsedSummary = await compute(_parseInIsolate, summarySlice);
 
       // Özet boşsa tüm metni parse et
       if (parsedSummary.isEmpty) {
         parsedSummary = await compute(_parseInIsolate, text);
+      }
+
+      // Hâlâ boşsa kullanıcıyı bilgilendir
+      if (parsedSummary.isEmpty) {
+        if (mounted) {
+          _showSnackBar('0 test bulundu. PDF şablonu farklı olabilir.', isError: true);
+        }
+        await TtsService.instance.speak('Herhangi bir test bulamadım. PDF formatı farklı olabilir.');
+        return;
       }
 
       final counts = _counts(parsedSummary);
@@ -225,9 +309,10 @@ class _EnabizPageState extends State<EnabizPage> {
       final wantDetails = await _showAnalysisDialog(summary, parsedSummary);
 
       if (wantDetails == true) {
-        final parsedFull = (parsedSummary.length > 5)
+        final parsedFull = parsedSummary.length >= 5
             ? parsedSummary
             : await compute(_parseInIsolate, text);
+
         if (parsedFull.isNotEmpty) {
           final details = _buildDetailsNarration(parsedFull);
           await TtsService.instance.speak(details);
@@ -238,7 +323,8 @@ class _EnabizPageState extends State<EnabizPage> {
 
       if (!mounted) return;
       _showSnackBar('Analiz tamamlandı.');
-    } catch (e) {
+    } catch (e, st) {
+      debugPrint('Analyze error: $e\n$st');
       await TtsService.instance.speak('Analiz sırasında bir hata oluştu.');
       if (!mounted) return;
       _showSnackBar('Analiz hatası: $e', isError: true);
@@ -680,11 +766,15 @@ class _EnabizPageState extends State<EnabizPage> {
     if (normals.isNotEmpty) {
       buf.writeln('Örnek normal değerler:');
       for (final t in normals) {
-        buf.writeln('${t['name']}: ${_fmt(t['value'])} ${t['unit'] ?? ''}. '
-            'Referans ${_rng(t['refLow'], t['refHigh'])} ${t['unit'] ?? ''}.');
+        buf.writeln('${t['name']}: ${_fmt(t['value'])} ${_unit(t)}. '
+            'Referans ${_rng(t['refLow'], t['refHigh'])} ${_unit(t)}.');
       }
     }
     return buf.toString();
+  }
+
+  String _unit(Map<String, dynamic> m) {
+    return (m['unit'] ?? '').toString();
   }
 }
 
@@ -881,7 +971,8 @@ class _AnalysisPreview extends StatelessWidget {
                             const SizedBox(height: 2),
                             Text(
                               [
-                                if (m['value'] != null) 'Değer: ${m['value']} ${m['unit'] ?? ''}',
+                                if (m['value'] != null && '${m['value']}'.isNotEmpty)
+                                  'Değer: ${m['value']} ${m['unit'] ?? ''}',
                                 if (m['refLow'] != null && m['refHigh'] != null)
                                   'Ref: ${m['refLow']}–${m['refHigh']} ${m['unit'] ?? ''}',
                               ].join(' • '),
@@ -903,6 +994,4 @@ class _AnalysisPreview extends StatelessWidget {
       ],
     );
   }
-
-  
 }
