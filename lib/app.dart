@@ -16,6 +16,7 @@ import 'memory_game.dart' as game;   // game.MemoryGamePage
 import 'settings.dart' as stg;       // stg.SettingsPage
 import 'enabiz.dart' as enb;         // enb.EnabizPage (Tahliller/PDF)
 import 'voice_bot.dart' as voice;    // voice.VoiceBotPage  ← SESLİ BOT GERÇEK SAYFA
+import 'profile.dart' as prof;  // <-- YENİ: Profil sayfası
 
 class RefaApp extends StatelessWidget {
   const RefaApp({super.key});
@@ -72,12 +73,14 @@ class RefaHomePage extends StatefulWidget {
 class _RefaHomePageState extends State<RefaHomePage> {
   String? selectedId;
 
+  // <-- YENİ: 'profile' kartını ekledim
   final items = const <_MenuItem>[
     _MenuItem('reminders', Icons.notifications, 'Hatırlatıcılar', 'İlaç ve Randevu', Color(0xFF3B82F6)),
     _MenuItem('voice', Icons.mic, 'Sesli Bot', 'Ses Komutları', Color(0xFF8B5CF6)),
     _MenuItem('today', Icons.calendar_today, 'Bugün', 'Günlük Plan', Color(0xFF06B6D4)),
     _MenuItem('memory', Icons.sports_esports, 'Hafıza Oyunu', 'Zihin Egzersizi', Color(0xFF22C55E)),
     _MenuItem('reports', Icons.description, 'Tahliller (PDF)', 'Tıbbi Raporlar', Color(0xFFF59E0B)),
+    _MenuItem('profile', Icons.person, 'Profil', 'Kişisel Bilgiler', Color(0xFF0EA5E9)), // <-- yeni
     _MenuItem('settings', Icons.settings, 'Ayarlar', 'Uygulama Ayarları', Color(0xFF6366F1)),
   ];
 
@@ -107,6 +110,9 @@ class _RefaHomePageState extends State<RefaHomePage> {
         break;
       case 'memory':
         nav.push(MaterialPageRoute(builder: (_) => const game.MemoryGamePage()));
+        break;
+      case 'profile': // <-- YENİ: Profil’e git
+        nav.push(MaterialPageRoute(builder: (_) => const prof.ProfilePage()));
         break;
       case 'settings':
         nav.push(MaterialPageRoute(builder: (_) => const stg.SettingsPage()));

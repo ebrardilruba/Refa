@@ -1,5 +1,3 @@
-// lib/enabiz.dart — Sertleştirilmiş e-Nabız PDF analiz ekranı (düzeltilmiş)
-
 import 'dart:async' show unawaited;
 import 'dart:io';
 import 'dart:typed_data';
@@ -13,7 +11,7 @@ import 'package:pdfx/pdfx.dart' as pdfx; // OCR rasterize
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart'; // OCR
 import 'package:file_picker/file_picker.dart'; // file_picker
 
-import 'tts_service.dart';
+import 'tts_service.dart'; // VoiceService burada
 import 'settings.dart';
 import 'lab_analyzer.dart';
 
@@ -111,7 +109,7 @@ Future<List<Map<String, dynamic>>> _parseInIsolate(String text) async {
   }).toList();
 }
 
-// Metin normalizasyonu (TR PDF’ler için güçlendirilmiş)
+// Metin normalizasyonu (TR PDF'ler için güçlendirilmiş)
 String _normalize(String raw) {
   var s = raw
       .replaceAll('\u00A0', ' ')
@@ -197,7 +195,7 @@ class _EnabizPageState extends State<EnabizPage> {
         // Syncfusion bazı sürümlerde özel tip export etmiyor → genel catch
         final msg = e.toString().toLowerCase();
         if (msg.contains('encrypt') || msg.contains('password')) {
-          _showSnackBar('Şifreli PDF. e-Nabız’dan şifresiz export al.', isError: true);
+          _showSnackBar("Şifreli PDF. e-Nabız'dan şifresiz export al.", isError: true);
           return;
         }
         rethrow;
@@ -233,7 +231,7 @@ class _EnabizPageState extends State<EnabizPage> {
     if (_pdfBytes == null) return;
     setState(() => _analyzing = true);
     try {
-      unawaited(TtsService.instance.speak('Analiz başlatıldı.'));
+      unawaited(VoiceService.instance.speak('Analiz başlatıldı.'));
 
       // --- A) Syncfusion ile metin
       String text = '';
@@ -257,7 +255,7 @@ class _EnabizPageState extends State<EnabizPage> {
         }
       }
 
-      // --- C) Hâlâ yoksa OCR’i 5 sayfaya yükselt
+      // --- C) Hâlâ yoksa OCR'i 5 sayfaya yükselt
       if (text.isEmpty) {
         try {
           text = await _ocrFirstPages(_pdfBytes!, pages: 5);
@@ -271,7 +269,7 @@ class _EnabizPageState extends State<EnabizPage> {
       }
 
       if (text.isEmpty) {
-        await TtsService.instance.speak("Bu PDF'den metin çıkaramadım.");
+        await VoiceService.instance.speak("Bu PDF'den metin çıkaramadım.");
         if (!mounted) return;
         _showSnackBar('Metin bulunamadı (muhtemelen görüntü tabanlı PDF).', isError: true);
         return;
@@ -291,7 +289,7 @@ class _EnabizPageState extends State<EnabizPage> {
         if (mounted) {
           _showSnackBar('0 test bulundu. PDF şablonu farklı olabilir.', isError: true);
         }
-        await TtsService.instance.speak('Herhangi bir test bulamadım. PDF formatı farklı olabilir.');
+        await VoiceService.instance.speak('Herhangi bir test bulamadım. PDF formatı farklı olabilir.');
         return;
       }
 
@@ -302,7 +300,7 @@ class _EnabizPageState extends State<EnabizPage> {
         _showSnackBar('Özet için ${parsedSummary.length} test bulundu.');
       }
 
-      await TtsService.instance
+      await VoiceService.instance
           .speak('Özet: $summary Detayları okumamı ister misiniz?');
 
       if (!mounted) return;
@@ -315,9 +313,9 @@ class _EnabizPageState extends State<EnabizPage> {
 
         if (parsedFull.isNotEmpty) {
           final details = _buildDetailsNarration(parsedFull);
-          await TtsService.instance.speak(details);
+          await VoiceService.instance.speak(details);
         } else {
-          await TtsService.instance.speak('Detay çıkarılamadı.');
+          await VoiceService.instance.speak('Detay çıkarılamadı.');
         }
       }
 
@@ -325,7 +323,7 @@ class _EnabizPageState extends State<EnabizPage> {
       _showSnackBar('Analiz tamamlandı.');
     } catch (e, st) {
       debugPrint('Analyze error: $e\n$st');
-      await TtsService.instance.speak('Analiz sırasında bir hata oluştu.');
+      await VoiceService.instance.speak('Analiz sırasında bir hata oluştu.');
       if (!mounted) return;
       _showSnackBar('Analiz hatası: $e', isError: true);
     } finally {
@@ -406,7 +404,7 @@ class _EnabizPageState extends State<EnabizPage> {
 
   @override
   void dispose() {
-    TtsService.instance.stop();
+    VoiceService.instance.stopSpeaking();
     super.dispose();
   }
 
@@ -450,7 +448,7 @@ class _EnabizPageState extends State<EnabizPage> {
                         ),
                       ),
                       _GlassButton(
-                        onPressed: () => TtsService.instance.stop(),
+                        onPressed: () => VoiceService.instance.stopSpeaking(),
                         child: const Icon(Icons.stop_circle_outlined, color: Colors.white),
                       ),
                       const SizedBox(width: 8),
@@ -501,7 +499,7 @@ class _EnabizPageState extends State<EnabizPage> {
 
                             // Description
                             const Text(
-                              'e-Nabız PDF\'ini yükle',
+                              "e-Nabız PDF'ini yükle",
                               textAlign: TextAlign.center,
                               style: TextStyle(
                                 color: Colors.white,

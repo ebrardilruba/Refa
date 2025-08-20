@@ -1,745 +1,291 @@
-// lib/tts_service.dart — Düzeltilmiş & Sertleştirilmiş Sürüm
+// lib/tts_service.dart
 import 'dart:async';
-import 'dart:io' show Platform;
-import 'package:flutter/foundation.dart';
 import 'package:flutter_tts/flutter_tts.dart';
-import 'package:speech_to_text/speech_to_text.dart';
-import 'package:speech_to_text/speech_recognition_result.dart';
+import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:permission_handler/permission_handler.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 
-/// UYARI: Eski kullanım `TtsService.I` ise hepsini `TtsService.instance` yap.
-/// Adapter aynı API’yi expose eder.
-class TtsService {
-  static EnhancedVoiceService get instance => EnhancedVoiceService.instance;
-}
+class VoiceService {
+  VoiceService._internal();
+  static final VoiceService _instance = VoiceService._internal();
+  static VoiceService get instance => _instance;
 
-class EnhancedVoiceService {
-  EnhancedVoiceService._();
-  static final instance = EnhancedVoiceService._();
-
-  // ---------- TTS ----------
-  FlutterTts? _tts;
-  bool _ttsInited = false;
+  // TTS
+  final FlutterTts _tts = FlutterTts();
+  bool _isTtsInitialized = false;
   bool _isSpeaking = false;
 
-  // ---------- STT ----------
-  SpeechToText? _stt;
-  bool _sttInited = false;
+  // STT
+  final stt.SpeechToText _stt = stt.SpeechToText();
+  bool _isSttInitialized = false;
   bool _isListening = false;
   String _currentWords = '';
-  String? _selectedLocaleId; // ör: tr_TR veya en_US
 
-  // ---------- Streams ----------
-  final _recognizedWordsController = StreamController<String>.broadcast();
-  final _listeningController = StreamController<bool>.broadcast();
-  final _statusController = StreamController<String>.broadcast();
-
-  Stream<String> get recognizedWordsStream => _recognizedWordsController.stream;
-  Stream<bool> get listeningStream => _listeningController.stream;
-  Stream<String> get statusStream => _statusController.stream;
-
-  bool get isListening => _isListening;
-  bool get isSpeaking => _isSpeaking;
-  String get currentWords => _currentWords;
-
-  // ---------- Settings ----------
-  static const _kRateKey = 'tts_rate';
-  static const _kPitchKey = 'tts_pitch';
-  static const _kLangKey = 'tts_lang';
-
-  double _rate = 0.45;
+  // Yaşlı dostu varsayılanlar
+  double _rate = 0.4;
   double _pitch = 1.0;
   String _lang = 'tr-TR';
 
-  double get rate => _rate;
-  double get pitch => _pitch;
-  String get lang => _lang;
+  // Streams
+  final _recognitionController = StreamController<String>.broadcast();
+  final _listeningController = StreamController<bool>.broadcast();
+  final _speakingController = StreamController<bool>.broadcast();
 
-  // ---------- STT düzeltmeleri ----------
-  final Map<String, String> _commonFixes = {
-    'merhaba': 'merhaba', 'meraba': 'merhaba', 'merha ba': 'merhaba',
-    'salam': 'selam', 'selam': 'selam', 'se lam': 'selam',
-    'nasısın': 'nasılsın', 'nasilsin': 'nasılsın', 'nasıl sın': 'nasılsın',
-    'iyiyim': 'iyiyim', 'iyi yim': 'iyiyim', 'iyyim': 'iyiyim',
-    'kötüyüm': 'kötüyüm', 'kotu yum': 'kötüyüm', 'kötü yüm': 'kötüyüm',
-    'yorgunum': 'yorgunum', 'yorgun um': 'yorgunum', 'yorgunu m': 'yorgunum',
-    'bugün ne var': 'bugün ne var', 'bugun ne war': 'bugün ne var', 'bu gün ne var': 'bugün ne var',
-    'saat kaç': 'saat kaç', 'sat kac': 'saat kaç', 'sa at kaç': 'saat kaç',
-    'ilaç ekle': 'ilaç ekle', 'ilac ekle': 'ilaç ekle', 'i laç ekle': 'ilaç ekle',
-    'hatırlatıcı ekle': 'hatırlatıcı ekle', 'hatirlat ci ekle': 'hatırlatıcı ekle',
-    'liste': 'listele', 'listele': 'listele', 'lis te': 'listele',
-    'sil': 'sil', 'silsilah': 'sil', 'si l': 'sil',
-    'yardım': 'yardım', 'yarım': 'yardım', 'help': 'yardım', 'yar dım': 'yardım',
-    'ne yesem': 'ne yesem', 'ne yiyem': 'ne yesem', 'ne ye sem': 'ne yesem',
-    'halsizim': 'halsizim', 'hal sizim': 'halsizim', 'hal siz im': 'halsizim',
-    'tahlil': 'tahlil', 'tahril': 'tahlil', 'tah lil': 'tahlil',
-    'profil': 'profil', 'pro fil': 'profil', 'prof il': 'profil',
+  Stream<String> get onRecognition => _recognitionController.stream;
+  Stream<bool> get onListeningChange => _listeningController.stream;
+  Stream<bool> get onSpeakingChange => _speakingController.stream;
+
+  // Yazım/kısaltma düzeltmeleri (STT çıktısını iyileştirmek için)
+  final Map<String, String> _commonFixes = const {
+    // Selam / teşekkür / onay
+    'meraba': 'merhaba', 'merba': 'merhaba', 'mrb': 'merhaba', 'slm': 'selam',
+    'sg': 'sağ ol', 'sagol': 'sağ ol', 'sağol': 'sağ ol', 'sağolun': 'sağ olun',
+    'eyw': 'teşekkür ederim', 'eyvallah': 'teşekkür ederim',
+    'ok': 'tamam', 'okk': 'tamam', 'tmm': 'tamam',
+    // Durum
+    'iyim': 'iyiyim', 'iyyim': 'iyiyim', 'iyiym': 'iyiyim',
+    'kotuyum': 'kötüyüm', 'kötuyum': 'kötüyüm',
+    // Sık komutlar / kavramlar
+    'ilac': 'ilaç', 'ilacc': 'ilaç',
+    'unutuyom': 'unutuyorum', 'unuttum': 'unutuyorum',
+    'nerdeyim': 'neredeyim', 'nerde': 'nerede',
+    'korkuyom': 'korkuyorum', 'yalnizim': 'yalnızım',
+    'saat kac': 'saat kaç',
+    'ne var': 'bugün ne var',
+    'yardim': 'yardım', 'imdat': 'yardım', 'acil': 'yardım',
   };
 
-  final Map<String, String> _numberWords = {
-    'bir': '1', 'iki': '2', 'üç': '3', 'dört': '4', 'beş': '5', 'altı': '6',
-    'yedi': '7', 'sekiz': '8', 'dokuz': '9', 'on': '10', 'onbir': '11', 'oniki': '12',
-    'onüç': '13', 'ondört': '14', 'onbeş': '15', 'onaltı': '16', 'onyedi': '17',
-    'onsekiz': '18', 'ondokuz': '19', 'yirmi': '20', 'otuz': '30', 'kırk': '40', 'elli': '50',
-  };
-
-  // ---------- Lifecycle ----------
+  // ---- Lifecycle ----
   Future<void> init() async {
-    try {
-      await _initTts();
-      await _initStt();
-      _updateStatus('Servis hazır');
-    } catch (e) {
-      _updateStatus('Servis başlatma hatası: $e');
-    }
+    await _initTts();
+    await _initStt();
   }
 
-  void dispose() {
-    _recognizedWordsController.close();
-    _listeningController.close();
-    _statusController.close();
-    _tts?.stop();
-    _stt?.stop();
-  }
-
-  // ---------- TTS ----------
   Future<void> _initTts() async {
-    if (_ttsInited) return;
-
+    if (_isTtsInitialized) return;
     try {
-      _tts = FlutterTts();
+      await _tts.setLanguage(_lang);
+      await _tts.setPitch(_pitch);
+      await _tts.setSpeechRate(_rate);
+      await _tts.setVolume(1.0);
+      await _tts.awaitSpeakCompletion(true);
 
-      final prefs = await SharedPreferences.getInstance();
-      _rate = prefs.getDouble(_kRateKey) ?? _rate;
-      _pitch = prefs.getDouble(_kPitchKey) ?? _pitch;
-      _lang = prefs.getString(_kLangKey) ?? _lang;
-
-      await _tts!.awaitSpeakCompletion(true);
-
-      if (!kIsWeb) {
-        if (Platform.isIOS) {
-          try {
-            await _tts!.setSharedInstance(true).catchError((_) {});
-            await _tts!.setIosAudioCategory(
-              IosTextToSpeechAudioCategory.playback,
-              [
-                IosTextToSpeechAudioCategoryOptions.allowBluetooth,
-                IosTextToSpeechAudioCategoryOptions.defaultToSpeaker,
-                IosTextToSpeechAudioCategoryOptions.mixWithOthers,
-              ],
-              IosTextToSpeechAudioMode.defaultMode,
-            );
-          } catch (e) {
-            debugPrint('iOS TTS ayarları hatası: $e');
-          }
-        } else if (Platform.isAndroid) {
-          try {
-            await _tts!.setEngine('com.google.android.tts');
-          } catch (e) {
-            debugPrint('Android TTS engine ayarı hatası: $e');
-          }
-        }
-      }
-
-      await _tts!.setVolume(1.0).catchError((_) {});
-      await _ensureLanguageAndVoiceAvailable();
-
-      _tts!.setStartHandler(() {
+      _tts.setStartHandler(() {
         _isSpeaking = true;
-        _updateStatus('Konuşuyor...');
+        _speakingController.add(true);
       });
-      _tts!.setCompletionHandler(() {
+
+      _tts.setCompletionHandler(() {
         _isSpeaking = false;
-        _updateStatus('TTS tamamlandı');
+        _speakingController.add(false);
       });
-      _tts!.setErrorHandler((msg) {
+
+      _tts.setErrorHandler((msg) {
         _isSpeaking = false;
-        _updateStatus('TTS hatası: $msg');
+        _speakingController.add(false);
+        debugPrint('TTS Hatası: $msg');
       });
 
-      await _applyTtsSettings();
-      _ttsInited = true;
-      _updateStatus('TTS hazır');
+      _isTtsInitialized = true;
     } catch (e) {
-      _updateStatus('TTS başlatılamadı: $e');
-      debugPrint('TTS init hatası: $e');
+      debugPrint('TTS Başlatma Hatası: $e');
     }
   }
 
-  Future<void> _ensureLanguageAndVoiceAvailable() async {
-    if (_tts == null) return;
+  Future<void> _initStt() async {
+    if (_isSttInitialized) return;
     try {
-      final langs = await _tts!.getLanguages;
-      if (langs is Iterable) {
-        final list = List<String>.from(langs.map((e) => e.toString()));
-        if (!list.contains(_lang)) {
-          if (list.contains('tr_TR')) _lang = 'tr_TR';
-          else if (list.contains('tr')) _lang = 'tr';
-        }
-      }
-      await _tts!.setLanguage(_lang);
-
-      final dynVoices = await _tts!.getVoices;
-      if (dynVoices is Iterable) {
-        final voices = dynVoices.map((v) => Map<String, dynamic>.from(v)).toList();
-        Map<String, dynamic>? pick;
-        for (final m in voices) {
-          final loc = (m['locale'] ?? m['name'] ?? '').toString().toLowerCase();
-          if (loc.startsWith('tr')) { pick = m; break; }
-        }
-        if (pick != null) {
-          final name = (pick['name'] ?? '').toString();
-          final locale = (pick['locale'] ?? '').toString();
-          if (name.isNotEmpty && locale.isNotEmpty) {
-            await _tts!.setVoice(<String, String>{'name': name, 'locale': locale});
-          }
-        }
-      }
-    } catch (e) {
-      debugPrint('Dil/voice fallback hatası: $e');
-    }
-  }
-
-  Future<void> _applyTtsSettings() async {
-    if (_tts == null) return;
-    try {
-      await _tts!.setLanguage(_lang);
-      await _tts!.setSpeechRate(_rate);
-      await _tts!.setPitch(_pitch);
-      await _tts!.setVolume(1.0);
-    } catch (e) {
-      debugPrint('TTS ayarları uygulanamadı: $e');
-    }
-  }
-
-  Future<void> setRate(double v) async {
-    try {
-      _rate = v.clamp(0.2, 0.9);
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setDouble(_kRateKey, _rate);
-      await _tts?.setSpeechRate(_rate);
-    } catch (e) {
-      debugPrint('Rate ayarlama hatası: $e');
-    }
-  }
-
-  Future<void> setPitch(double v) async {
-    try {
-      _pitch = v.clamp(0.7, 1.3);
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setDouble(_kPitchKey, _pitch);
-      await _tts?.setPitch(_pitch);
-    } catch (e) {
-      debugPrint('Pitch ayarlama hatası: $e');
-    }
-  }
-
-  Future<void> setLanguage(String code) async {
-    try {
-      _lang = code;
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_kLangKey, _lang);
-      await _ensureLanguageAndVoiceAvailable();
-      await _applyTtsSettings();
-    } catch (e) {
-      debugPrint('Dil ayarlama hatası: $e');
-    }
-  }
-
-  Future<void> speak(String text) async {
-    if (text.trim().isEmpty) return;
-
-    try {
-      await init();
-      if (_tts == null) {
-        _updateStatus('TTS başlatılamadı');
+      final status = await Permission.microphone.request();
+      if (status.isDenied || status.isPermanentlyDenied) {
+        debugPrint('Mikrofon izni reddedildi');
         return;
       }
 
-      if (_isListening) {
-        await stopListening();
-        await Future.delayed(const Duration(milliseconds: 150));
-      }
-
-      await stopSpeaking();
-      await Future.delayed(const Duration(milliseconds: 150));
-
-      await _applyTtsSettings();
-
-      final cleanedText = _enhancedTextCleaning(text);
-      final toSpeak = cleanedText.trim().isEmpty ? text.trim() : cleanedText.trim();
-      if (toSpeak.isEmpty) return;
-
-      debugPrint('TTS toSpeak="${toSpeak.length > 80 ? toSpeak.substring(0,80)+"..." : toSpeak}" len=${toSpeak.length}');
-
-      final parts = _chunkSmart(toSpeak, maxLen: 600);
-      for (final part in parts) {
-        final finalText = _lastMinuteCheck(part);
-        if (finalText.trim().isNotEmpty) {
-          await _tts!.speak(finalText); // awaitSpeakCompletion(true) aktif
-        }
-      }
+      _isSttInitialized = await _stt.initialize(
+        onStatus: (s) => debugPrint('STT Durumu: $s'),
+        onError: (e) => debugPrint('STT Hatası: $e'),
+      );
     } catch (e) {
-      _isSpeaking = false;
-      _updateStatus('TTS konuşma hatası: $e');
-      debugPrint('Speak hatası: $e');
+      debugPrint('STT Başlatma Hatası: $e');
     }
   }
 
-  // Eski API eşleştirmeleri
-  Future<void> speakText(String text) => speak(text);
-  Future<void> stop() => stopSpeaking();
-  Future<void> stopTts() => stopSpeaking();
+  // ---- TTS ----
+  Future<void> speak(String text) async {
+    if (text.isEmpty) return;
+    await _initTts();
+
+    if (_isListening) await stopListening();
+    await _tts.speak(_cleanTextForElderly(text));
+  }
+
+  String _cleanTextForElderly(String text) {
+    var cleaned = text;
+
+    // daha akıcı okunuş için küçük sadeleştirmeler
+    cleaned = cleaned.replaceAll('lütfen', '');
+    cleaned = cleaned.replaceAll('rica ederim', '');
+    cleaned = cleaned.replaceAll('yardımcı olabilirim', 'yardım ederim');
+
+    cleaned = cleaned.replaceAll('.', '. ');
+    cleaned = cleaned.replaceAll(',', ', ');
+    cleaned = cleaned.replaceAll('!', '! ');
+    cleaned = cleaned.replaceAll('?', '? ');
+
+    cleaned = cleaned.replaceAll(RegExp(r'\s+'), ' ');
+    return cleaned.trim();
+  }
 
   Future<void> stopSpeaking() async {
-    try {
+    if (_isSpeaking) {
+      await _tts.stop();
       _isSpeaking = false;
-      await _tts?.stop();
-      _updateStatus('TTS durduruldu');
-    } catch (e) {
-      debugPrint('TTS durdurma hatası: $e');
+      _speakingController.add(false);
     }
   }
 
-  // ---------- STT ----------
-  Future<void> _initStt() async {
-    if (_sttInited) return;
-
-    try {
-      final permission = await Permission.microphone.status;
-      if (permission.isDenied) {
-        final result = await Permission.microphone.request();
-        if (result.isDenied) {
-          _updateStatus('Mikrofon izni reddedildi');
-          return;
-        }
-      }
-
-      _stt = SpeechToText();
-
-      final available = await _stt!.initialize(
-        onStatus: _onSttStatus,
-        onError: _onSttError,
-        debugLogging: kDebugMode,
-      );
-
-      if (available) {
-        _sttInited = true;
-        _updateStatus('STT hazır');
-
-        try {
-          final locales = await _stt!.locales();
-          final preferred = locales.firstWhere(
-            (l) => l.localeId.toLowerCase().startsWith('tr'),
-            orElse: () => locales.isNotEmpty ? locales.first : LocaleName('', ''),
-          );
-          _selectedLocaleId = preferred.localeId.isNotEmpty ? preferred.localeId : null;
-
-          final sys = await _stt!.systemLocale();
-          debugPrint('STT system locale: ${sys?.localeId}');
-          debugPrint('STT locales: ${locales.map((l) => l.localeId).toList()}');
-          debugPrint('Seçilen STT locale: ${_selectedLocaleId ?? "(varsayılan)"}');
-        } catch (e) {
-          _selectedLocaleId = null;
-          debugPrint('Locale seçimi hatası: $e');
-        }
-      } else {
-        _updateStatus('STT başlatılamadı');
-      }
-    } catch (e) {
-      _updateStatus('STT init hatası: $e');
-      debugPrint('STT başlatma hatası: $e');
-    }
-  }
-
-  void _onSttStatus(String status) {
-    _updateStatus('STT: $status');
-
-    if (status == 'listening') {
-      _isListening = true;
-    } else if (status == 'done' || status == 'notListening') {
-      _isListening = false;
-    }
-
-    if (!_listeningController.isClosed) {
-      _listeningController.add(_isListening);
-    }
-  }
-
-  void _onSttError(dynamic error) {
-    _updateStatus('STT Hatası: $error');
-    _isListening = false;
-    if (!_listeningController.isClosed) {
-      _listeningController.add(false);
-    }
-    debugPrint('STT error: $error');
-  }
-
-  Future<void> startListening({
+  // ---- STT ----
+  Future<bool> startListening({
     Duration timeout = const Duration(seconds: 45),
-    Duration pauseFor = const Duration(seconds: 6),
+    Duration pauseFor = const Duration(seconds: 8),
   }) async {
-    try {
-      if (!_sttInited) {
-        await _initStt();
-        if (!_sttInited || _stt == null) {
-          _updateStatus('STT başlatılamadı');
-          return;
-        }
-      }
+    await _initStt();
+    if (!_isSttInitialized) return false;
 
-      if (_isListening) {
-        await stopListening();
-        await Future.delayed(const Duration(milliseconds: 200));
-      }
+    if (_isSpeaking) await stopSpeaking();
+    await Future.delayed(const Duration(milliseconds: 300));
 
-      if (_isSpeaking) {
-        await stopSpeaking();
-        await Future.delayed(const Duration(milliseconds: 300));
-      }
+    _isListening = true;
+    _listeningController.add(true);
+    _currentWords = '';
 
-      _currentWords = '';
-      if (!_recognizedWordsController.isClosed) {
-        _recognizedWordsController.add('');
-      }
-
-      final started = await _stt!.listen(
-        onResult: _onSttResult,
-        listenFor: timeout,
-        pauseFor: pauseFor,
-        partialResults: true,
-        localeId: _selectedLocaleId,
-        cancelOnError: true,
-        listenMode: ListenMode.dictation,
-      );
-
-      if (started) {
-        _isListening = true;
-        if (!_listeningController.isClosed) {
-          _listeningController.add(true);
-        }
-        _updateStatus('Dinliyor... Konuşabilirsiniz');
-      } else {
-        _updateStatus('Dinleme başlatılamadı');
-      }
-    } catch (e) {
-      _updateStatus('Dinleme hatası: $e');
-      _isListening = false;
-      if (!_listeningController.isClosed) {
-        _listeningController.add(false);
-      }
-      debugPrint('STT listen hatası: $e');
-    }
-  }
-
-  void _onSttResult(SpeechRecognitionResult result) {
-    try {
-      if (result.recognizedWords.isNotEmpty) {
+    return await _stt.listen(
+      onResult: (result) {
         _currentWords = result.recognizedWords;
-
-        if (!_recognizedWordsController.isClosed) {
-          _recognizedWordsController.add(_currentWords);
-        }
+        _recognitionController.add(_currentWords);
 
         if (result.finalResult) {
-          final cleaned = _enhanceRecognizedText(_currentWords);
-          if (!_recognizedWordsController.isClosed) {
-            _recognizedWordsController.add(cleaned);
-          }
-          _updateStatus('Tanınan: "$cleaned"');
+          final enhancedText = _enhanceRecognizedText(_currentWords);
+          _recognitionController.add(enhancedText);
+          _currentWords = enhancedText;
         }
-      }
-    } catch (e) {
-      debugPrint('STT result işleme hatası: $e');
-    }
-  }
-
-  Future<void> stopListening() async {
-    if (_isListening && _stt != null) {
-      try {
-        await _stt!.cancel();
-        _isListening = false;
-        if (!_listeningController.isClosed) {
-          _listeningController.add(false);
-        }
-        _updateStatus('Dinleme durduruldu');
-      } catch (e) {
-        _updateStatus('Dinleme durdurulamadı: $e');
-        debugPrint('STT stop hatası: $e');
-      }
-    }
-  }
-
-  // ---------- TTS Metin Temizleme ----------
-  String _enhancedTextCleaning(String text) {
-    if (text.trim().isEmpty) return '';
-
-    String cleaned = text
-        .replaceAll('\r', ' ')
-        .replaceAll('\t', ' ')
-        .replaceAll(RegExp(r'\s+'), ' ')
-        .trim();
-
-    cleaned = _cleanEmojisAndSpecialChars(cleaned);
-
-    cleaned = cleaned.replaceAll(
-      RegExp(r'https?://[^\s]+|www\.[^\s]+', caseSensitive: false),
-      'link',
-    );
-
-    cleaned = cleaned.replaceAll(
-      RegExp(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'),
-      'email adresi',
-    );
-
-    const symbolFixes = {
-      '&': 've', '@': 'at işareti', '#': 'hashtag', '%': 'yüzde',
-      '+': 'artı', '=': 'eşittir', '<': 'küçüktür', '>': 'büyüktür',
-      '€': 'euro', r'$': 'dolar', '₺': 'türk lirası',
-    };
-    symbolFixes.forEach((symbol, replacement) {
-      cleaned = cleaned.replaceAll(symbol, ' $replacement ');
-    });
-
-    cleaned = _processNumbers(cleaned);
-    cleaned = _fixRepeatingChars(cleaned);
-    cleaned = _fixPunctuation(cleaned);
-
-    cleaned = cleaned
-        .replaceAll(RegExp(r'\s+'), ' ')
-        .replaceAll(RegExp(r'\s+([.,!?;:])'), r'$1')
-        .trim();
-
-    return cleaned;
-  }
-
-  String _cleanEmojisAndSpecialChars(String text) {
-    return text.replaceAll(
-      RegExp(
-        r'[\u{1f300}-\u{1f5ff}]|[\u{1f600}-\u{1f64f}]|[\u{1f680}-\u{1f6ff}]|'
-        r'[\u{2600}-\u{26ff}]|[\u{2700}-\u{27bf}]',
-        unicode: true,
-      ),
-      ' ',
-    );
-  }
-
-  String _processNumbers(String text) {
-    return text.replaceAllMapped(
-      RegExp(r'(\d{1,2})\.(\d{1,2})\.(\d{4})'),
-      (match) {
-        final day = int.tryParse(match.group(1)!) ?? 0;
-        final month = int.tryParse(match.group(2)!) ?? 0;
-        final year = match.group(3)!;
-
-        const months = [
-          '', 'ocak', 'şubat', 'mart', 'nisan', 'mayıs', 'haziran',
-          'temmuz', 'ağustos', 'eylül', 'ekim', 'kasım', 'aralık'
-        ];
-
-        if (month > 0 && month <= 12) {
-          return '$day ${months[month]} $year';
-        }
-        return match.group(0)!;
       },
+      listenFor: timeout,
+      pauseFor: pauseFor,
+      localeId: _lang,
+      partialResults: true,
+      listenMode: stt.ListenMode.dictation,
+      onSoundLevelChange: (level) {},
+      cancelOnError: true,
     );
   }
 
-  String _fixRepeatingChars(String text) {
-    const vowels = 'aeıioöuüAEIİOÖUÜ';
-    return text.replaceAllMapped(
-      RegExp(r'([A-Za-zÇĞİÖŞÜçğıöşü0-9])\1{2,}', caseSensitive: false),
-      (match) {
-        final char = match.group(1)!;
-        return vowels.contains(char)
-            ? '$char$char'
-            : char;
-      },
-    );
-  }
-
-  String _fixPunctuation(String text) {
-    return text
-        .replaceAll(RegExp(r'[.,]{2,}'), '.')
-        .replaceAll(RegExp(r'[!]{2,}'), '!')
-        .replaceAll(RegExp(r'[?]{2,}'), '?')
-        .replaceAll(RegExp(r'\s+([.,!?;:])'), r'$1');
-  }
-
-  String _lastMinuteCheck(String text) {
-    if (text.isEmpty) return text;
-    // Sadece tamamen işaretlerden oluşuyorsa yut
-    if (RegExp(r'^[^A-Za-zÇĞİÖŞÜçğıöşü0-9\s]+$').hasMatch(text)) return '';
-    // Sayısal baskın metinleri, KISA ise “sayısal veri” de (uzunsa bırak)
-    final digits = RegExp(r'\d').allMatches(text).length;
-    final ratio = text.isEmpty ? 0.0 : digits / text.length;
-    if (text.length < 12 && ratio > 0.9) return 'sayısal veri';
-    return text;
-  }
-
-  List<String> _chunkSmart(String text, {int maxLen = 600}) {
-    final cleanText = text
-        .replaceAll('\r', ' ')
-        .replaceAll(RegExp(r' {2,}'), ' ')
-        .trim();
-
-    if (cleanText.length <= maxLen) return [cleanText];
-
-    final sentences = _splitSentences(cleanText);
-    final chunks = <String>[];
-    var buf = StringBuffer();
-    var currLen = 0;
-
-    void flush() {
-      if (currLen > 0) {
-        chunks.add(buf.toString().trim());
-        buf = StringBuffer();
-        currLen = 0;
-      }
-    }
-
-    for (final sentence in sentences) {
-      if (sentence.length > maxLen) {
-        final wordChunks = _chunkByWords(sentence, maxLen);
-        for (final chunk in wordChunks) {
-          if (currLen + chunk.length + 1 > maxLen) flush();
-          buf.write(chunk);
-          buf.write(' ');
-          currLen += chunk.length + 1;
-        }
-        continue;
-      }
-
-      if (currLen + sentence.length + 1 > maxLen) flush();
-      buf.write(sentence);
-      if (!sentence.endsWith('\n')) {
-        buf.write(' ');
-        currLen += sentence.length + 1;
-      } else {
-        currLen += sentence.length;
-      }
-    }
-
-    flush();
-    return chunks.where((chunk) => chunk.trim().isNotEmpty).toList();
-  }
-
-  List<String> _splitSentences(String text) {
-    final regex = RegExp(r'(.+?(?:[\.!\?…]|\n|$))', dotAll: true);
-    final sentences = <String>[];
-
-    for (final match in regex.allMatches(text)) {
-      final sentence = match.group(0)?.trim();
-      if (sentence != null && sentence.isNotEmpty) {
-        sentences.add(sentence);
-      }
-    }
-    return sentences;
-  }
-
-  List<String> _chunkByWords(String text, int maxLen) {
-    final words = text.split(RegExp(r'\s+'));
-    final chunks = <String>[];
-    var buf = StringBuffer();
-    var currLen = 0;
-
-    void flush() {
-      if (currLen > 0) {
-        chunks.add(buf.toString().trim());
-        buf = StringBuffer();
-        currLen = 0;
-      }
-    }
-
-    for (final word in words) {
-      if (currLen + word.length + 1 > maxLen) flush();
-      buf.write(word);
-      buf.write(' ');
-      currLen += word.length + 1;
-    }
-
-    flush();
-    return chunks;
-  }
-
-  // ---------- STT metin iyileştirme ----------
   String _enhanceRecognizedText(String text) {
-    if (text.trim().isEmpty) return text;
+    if (text.isEmpty) return text;
 
-    String cleaned = text.toLowerCase().trim();
+    var cleaned = text.toLowerCase();
 
+    // Türkçe kelime sınırı için unicode:true kullanalım
     _commonFixes.forEach((wrong, correct) {
       cleaned = cleaned.replaceAll(
-        RegExp(r'(^|[^A-Za-zÇĞİÖŞÜçğıöşü])' + RegExp.escape(wrong) + r'(?=[^A-Za-zÇĞİÖŞÜçğıöşü]|$)', caseSensitive: false),
+        RegExp(r'\b' + RegExp.escape(wrong) + r'\b', unicode: true, caseSensitive: false),
         correct,
       );
     });
 
-    _numberWords.forEach((word, number) {
-      cleaned = cleaned.replaceAll(
-        RegExp(r'(^|[^A-Za-zÇĞİÖŞÜçğıöşü])' + RegExp.escape(word) + r'(?=[^A-Za-zÇĞİÖŞÜçğıöşü]|$)', caseSensitive: false),
-        number,
-      );
-    });
-
-    cleaned = _fixTimeExpressions(cleaned);
-    cleaned = _addBasicPunctuation(cleaned);
+    // Soru gibi cümleyse soru işareti ekle
+    if (cleaned.contains(' mi ') || cleaned.contains(' mı ') ||
+        cleaned.contains(' mu ') || cleaned.contains(' mü ') ||
+        cleaned.contains('ne zaman') || cleaned.contains('nasıl') ||
+        cleaned.startsWith('kim') || cleaned.startsWith('nerede') ||
+        cleaned.startsWith('nerde')) {
+      if (!cleaned.endsWith('?')) cleaned += '?';
+    }
 
     if (cleaned.isNotEmpty) {
-      cleaned = cleaned[0].toUpperCase() + (cleaned.length > 1 ? cleaned.substring(1) : '');
+      cleaned = cleaned[0].toUpperCase() + cleaned.substring(1);
     }
     return cleaned;
   }
 
-  String _fixTimeExpressions(String text) {
-    final regex = RegExp(r'(\d{1,2})\s+(otuz|on|yirmi|elli|kırk)', caseSensitive: false);
-    return text.replaceAllMapped(regex, (match) {
-      final hour = match.group(1)!;
-      final minuteWord = match.group(2)!.toLowerCase();
-      const minuteMap = {'otuz': '30', 'on': '10', 'yirmi': '20', 'elli': '50', 'kırk': '40'};
-      final minute = minuteMap[minuteWord] ?? '00';
-      return '$hour:$minute';
-    });
-  }
-
-  String _addBasicPunctuation(String text) {
-    if (RegExp(r'^(ne|nasıl|neden|nerede|kim|hangi|kaç)', caseSensitive: false).hasMatch(text)) {
-      if (!text.endsWith('?')) {
-        text += '?';
-      }
-    }
-    return text;
-  }
-
-  // ---------- Utilities ----------
-  void _updateStatus(String status) {
-    debugPrint('VoiceService: $status');
-    if (!_statusController.isClosed) {
-      _statusController.add(status);
+  Future<void> stopListening() async {
+    if (_isListening) {
+      await _stt.stop();
+      _isListening = false;
+      _listeningController.add(false);
     }
   }
 
-  // ---------- Test ----------
-  Future<bool> testTts() async {
-    try {
-      await speak('Test mesajı');
-      return true;
-    } catch (e) {
-      debugPrint('TTS test hatası: $e');
-      return false;
+  // Ayarlar (SettingsPage ile uyumlu)
+  Future<void> setRate(double rate) async {
+    _rate = rate.clamp(0.2, 0.9);
+    if (_isTtsInitialized) {
+      await _tts.setSpeechRate(_rate);
     }
   }
 
-  Future<bool> testStt() async {
-    try {
-      await startListening(timeout: const Duration(seconds: 5));
-      await Future.delayed(const Duration(seconds: 2));
-      await stopListening();
-      return true;
-    } catch (e) {
-      debugPrint('STT test hatası: $e');
-      return false;
+  Future<void> setPitch(double pitch) async {
+    _pitch = pitch.clamp(0.7, 1.3);
+    if (_isTtsInitialized) {
+      await _tts.setPitch(_pitch);
     }
   }
+
+  Future<void> setLanguage(String languageCode) async {
+    _lang = languageCode;
+    if (_isTtsInitialized) {
+      await _tts.setLanguage(_lang);
+    }
+  }
+
+  void dispose() {
+    _stt.stop();
+    _tts.stop();
+    _recognitionController.close();
+    _listeningController.close();
+    _speakingController.close();
+  }
+
+  // Getters
+  bool get isListening => _isListening;
+  bool get isSpeaking => _isSpeaking;
+  String get currentWords => _currentWords;
+  double get rate => _rate;
+  double get pitch => _pitch;
+  String get lang => _lang;
+  String get language => _lang; // alias
+}
+
+// Eski kodlarla uyum için hafif adapter
+class TtsService {
+  TtsService._();
+  static final TtsService instance = TtsService._();
+
+  final _v = VoiceService.instance;
+
+  Stream<String> get onRecognition => _v.onRecognition;
+  Stream<bool> get onListeningChange => _v.onListeningChange;
+  Stream<bool> get onSpeakingChange => _v.onSpeakingChange;
+
+  Future<void> init() => _v.init();
+  Future<void> speak(String t) => _v.speak(t);
+  Future<void> stop() => _v.stopSpeaking();
+  Future<void> stopSpeaking() => _v.stopSpeaking();
+  Future<bool> startListening({
+    Duration timeout = const Duration(seconds: 45),
+    Duration pauseFor = const Duration(seconds: 8),
+  }) =>
+      _v.startListening(timeout: timeout, pauseFor: pauseFor);
+  Future<void> stopListening() => _v.stopListening();
+  Future<void> setRate(double r) => _v.setRate(r);
+  Future<void> setPitch(double p) => _v.setPitch(p);
+  Future<void> setLanguage(String l) => _v.setLanguage(l);
+
+  bool get isListening => _v.isListening;
+  bool get isSpeaking => _v.isSpeaking;
+  String get currentWords => _v.currentWords;
+  double get rate => _v.rate;
+  double get pitch => _v.pitch;
+  String get lang => _v.lang;
+  String get language => _v.language;
 }

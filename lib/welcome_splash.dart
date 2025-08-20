@@ -1,9 +1,9 @@
-// lib/welcome_splash.dart — TTS servisine geçirildi
+// lib/welcome_splash.dart — VoiceService'e geçirildi
 import 'dart:io' show Platform;
 import 'dart:ui';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'tts_service.dart';
+import 'tts_service.dart'; // VoiceService burada
 
 class WelcomeSplash extends StatefulWidget {
   const WelcomeSplash({super.key});
@@ -40,8 +40,8 @@ class _WelcomeSplashState extends State<WelcomeSplash>
 
   Future<void> _run() async {
     try {
-      // Tek noktadan TTS
-      await TtsService.instance.speak("Refa'ya hoş geldiniz");
+      // VoiceService kullanımı
+      await VoiceService.instance.speak("Refa'ya hoş geldiniz");
       // splash minimum süre
       await Future.delayed(const Duration(milliseconds: 1200));
     } catch (e) {
@@ -56,7 +56,7 @@ class _WelcomeSplashState extends State<WelcomeSplash>
 
   @override
   void dispose() {
-    TtsService.instance.stop();
+    VoiceService.instance.stopSpeaking(); // stop() yerine stopSpeaking()
     _ctrl.dispose();
     super.dispose();
   }
@@ -101,7 +101,7 @@ class _WelcomeSplashState extends State<WelcomeSplash>
                           ),
                           const SizedBox(height: 20),
                           const Text(
-                            'Refa’ya Hoş Geldiniz',
+                            "Refa'ya Hoş Geldiniz",
                             textAlign: TextAlign.center,
                             style: TextStyle(
                               color: Colors.white,

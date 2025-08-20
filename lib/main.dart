@@ -6,7 +6,9 @@ import 'package:flutter/foundation.dart'; // debugPrint için
 
 import 'package:firebase_core/firebase_core.dart';
 import 'firebase_options.dart'; // flutterfire configure ile oluşur
-import 'app.dart'; // RefaApp burada
+
+import 'app.dart';        // RefaApp burada
+import 'profile.dart';    // HealthStore.init() için (kalıcı profil yükleme)
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -27,6 +29,13 @@ Future<void> main() async {
     );
   } catch (e, st) {
     debugPrint('Firebase init FAILED: $e\n$st');
+  }
+
+  // Profil/veri deposunu açılışta yükle (SharedPreferences)
+  try {
+    await HealthStore.init();
+  } catch (e, st) {
+    debugPrint('HealthStore init FAILED: $e\n$st');
   }
 
   // Sistem UI

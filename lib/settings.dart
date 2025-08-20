@@ -1,9 +1,6 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
-import 'tts_service.dart';
-import 'package:refa/tts_service.dart'; // proje adın farklıysa: import 'tts_service.dart';
-
-
+import 'tts_service.dart'; // VoiceService burada
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
@@ -13,9 +10,9 @@ class SettingsPage extends StatefulWidget {
 }
 
 class _SettingsPageState extends State<SettingsPage> {
-  double _rate = TtsService.instance.rate;   // 0.2–0.9
-  double _pitch = TtsService.instance.pitch; // 0.7–1.3
-  String _lang = TtsService.instance.lang;   // 'tr-TR' varsayılan
+  double _rate = VoiceService.instance.rate;   // 0.2–0.9
+  double _pitch = VoiceService.instance.pitch; // 0.7–1.3
+  String _lang = VoiceService.instance.lang;   // 'tr-TR' varsayılan
 
   @override
   Widget build(BuildContext context) {
@@ -85,7 +82,7 @@ class _SettingsPageState extends State<SettingsPage> {
                             inactiveColor: Colors.white.withOpacity(0.3),
                             thumbColor: Colors.white,
                             onChanged: (v) => setState(() => _rate = v),
-                            onChangeEnd: (v) async => await TtsService.instance.setRate(v),
+                            onChangeEnd: (v) async => await VoiceService.instance.setRate(v),
                           ),
                         ),
                         
@@ -105,7 +102,7 @@ class _SettingsPageState extends State<SettingsPage> {
                             inactiveColor: Colors.white.withOpacity(0.3),
                             thumbColor: Colors.white,
                             onChanged: (v) => setState(() => _pitch = v),
-                            onChangeEnd: (v) async => await TtsService.instance.setPitch(v),
+                            onChangeEnd: (v) async => await VoiceService.instance.setPitch(v),
                           ),
                         ),
                         
@@ -130,13 +127,19 @@ class _SettingsPageState extends State<SettingsPage> {
                               dropdownColor: Colors.white,
                               style: const TextStyle(color: Colors.white),
                               items: const [
-                                DropdownMenuItem(value: 'tr-TR', child: Text('Türkçe (tr-TR)', style: TextStyle(color: Colors.black))),
-                                DropdownMenuItem(value: 'en-US', child: Text('English (en-US)', style: TextStyle(color: Colors.black))),
+                                DropdownMenuItem(
+                                  value: 'tr-TR',
+                                  child: Text('Türkçe (tr-TR)', style: TextStyle(color: Colors.black)),
+                                ),
+                                DropdownMenuItem(
+                                  value: 'en-US',
+                                  child: Text('English (en-US)', style: TextStyle(color: Colors.black)),
+                                ),
                               ],
                               onChanged: (v) async {
                                 if (v == null) return;
                                 setState(() => _lang = v);
-                                await TtsService.instance.setLanguage(v);
+                                await VoiceService.instance.setLanguage(v);
                               },
                             ),
                           ),
@@ -147,7 +150,7 @@ class _SettingsPageState extends State<SettingsPage> {
                         // Test Button
                         _GlassActionCard(
                           onPressed: () async {
-                            await TtsService.instance.speak(
+                            await VoiceService.instance.speak(
                               'Bu bir deneme cümlesidir. Türkçe karakterler: Ç, Ğ, İ, Ö, Ş, Ü. '
                               'Hız ${_rate.toStringAsFixed(2)}, perde ${_pitch.toStringAsFixed(2)}.'
                             );
