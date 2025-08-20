@@ -1,23 +1,23 @@
+// lib/enabiz_page.dart
 import 'dart:async' show unawaited;
 import 'dart:io';
+import 'dart:math' show min;
 import 'dart:typed_data';
 import 'dart:ui';
 
-import 'package:flutter/foundation.dart'; // compute()
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:pdfx/pdfx.dart' as pdfx;
 import 'package:syncfusion_flutter_pdf/pdf.dart';
-import 'package:pdfx/pdfx.dart' as pdfx; // OCR rasterize
-import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart'; // OCR
-import 'package:file_picker/file_picker.dart'; // file_picker
 
-import 'tts_service.dart'; // VoiceService burada
+import 'lab_analyzer.dart'; // LabAnalyzer, LabFlag, EnabizTableParser
 import 'settings.dart';
-import 'lab_analyzer.dart';
+import 'tts_service.dart';
 
 // ===================== ISOLATE FONKSİYONLARI =====================
 
-// 1) Syncfusion: tüm sayfalardan metin (isolate)
 Future<String> _extractTextInIsolate(Uint8List bytes) async {
   final doc = PdfDocument(inputBytes: bytes);
   final extractor = PdfTextExtractor(doc);
@@ -30,90 +30,93 @@ Future<String> _extractTextInIsolate(Uint8List bytes) async {
   return _normalize(sb.toString());
 }
 
-// 2) OCR: ilk N sayfayı PNG'e render edip ML Kit'le oku (fallback)
-Future<String> _ocrFirstPages(Uint8List bytes, {int pages = 2}) async {
-  pdfx.PdfDocument? doc;
+Future<String> _enhancedOcr(Uint8List bytes, {int pages = 3}) async {
   final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
   final sb = StringBuffer();
+  pdfx.PdfDocument? doc;
 
   try {
     doc = await pdfx.PdfDocument.openData(bytes);
-    final pageCount = doc.pagesCount;
-    final limit = pages < pageCount ? pages : pageCount;
+    final pageCount = min(pages, doc.pagesCount);
 
-    for (var i = 1; i <= limit; i++) {
+    for (var i = 1; i <= pageCount; i++) {
       final page = await doc.getPage(i);
       try {
         final img = await page.render(
-          width: page.width.toDouble() / 2,
-          height: page.height.toDouble() / 2,
+          width: page.width.toDouble(),
+          height: page.height.toDouble(),
           format: pdfx.PdfPageImageFormat.png,
         );
-        if (img == null) continue;
-
-        final pngFile =
-            await File('${Directory.systemTemp.path}/refa_ocr_$i.png').create();
-        await pngFile.writeAsBytes(img.bytes, flush: true);
-
-        final input = InputImage.fromFilePath(pngFile.path);
-        final result = await recognizer.processImage(input);
-        if (result.text.isNotEmpty) sb.writeln(result.text);
-
-        unawaited(pngFile.delete());
+        if (img != null) {
+          final tmp = await File('${Directory.systemTemp.path}/enhanced_ocr_$i.png').create();
+          await tmp.writeAsBytes(img.bytes, flush: true);
+          final input = InputImage.fromFilePath(tmp.path);
+          final result = await recognizer.processImage(input);
+          if (result.text.isNotEmpty) {
+            sb.writeln('=== PAGE $i ===');
+            sb.writeln(result.text);
+            sb.writeln();
+          }
+          unawaited(tmp.delete());
+        }
       } finally {
         await page.close();
       }
     }
   } catch (e, st) {
-    debugPrint('OCR error: $e\n$st');
+    debugPrint('enhanced OCR error: $e\n$st');
   } finally {
     await recognizer.close();
     await doc?.close();
   }
-
   return _normalize(sb.toString());
 }
 
-// 3) Parse — isolate
 Future<List<Map<String, dynamic>>> _parseInIsolate(String text) async {
   final report = LabAnalyzer.parse(text);
-  return report.tests.map((t) {
-    String flag;
-    switch (t.flag) {
-      case LabFlag.high:
-        flag = 'high';
-        break;
-      case LabFlag.low:
-        flag = 'low';
-        break;
-      case LabFlag.normal:
-        flag = 'normal';
-        break;
-      case LabFlag.positive:
-        flag = 'positive';
-        break;
-      case LabFlag.borderline:
-        flag = 'borderline';
-        break;
-      default:
-        flag = 'unknown';
-    }
-    return {
-      'name': t.name,
-      'value': t.value,
-      'unit': t.unit,
-      'refLow': t.refLow,
-      'refHigh': t.refHigh,
-      'flag': flag,
-    };
-  }).toList();
+  return report.tests.map(_mapTest).toList();
 }
 
-// Metin normalizasyonu (TR PDF'ler için güçlendirilmiş)
+Future<List<Map<String, dynamic>>> _parseTableInIsolate(String text) async {
+  final report = EnabizTableParser.parseTable(text);
+  return report.tests.map(_mapTest).toList();
+}
+
+Map<String, dynamic> _mapTest(LabTest t) {
+  String flag;
+  switch (t.flag) {
+    case LabFlag.high:
+      flag = 'high';
+      break;
+    case LabFlag.low:
+      flag = 'low';
+      break;
+    case LabFlag.normal:
+      flag = 'normal';
+      break;
+    case LabFlag.positive:
+      flag = 'positive';
+      break;
+    case LabFlag.borderline:
+      flag = 'borderline';
+      break;
+    default:
+      flag = 'unknown';
+  }
+  return {
+    'name': t.name,
+    'value': t.value,
+    'unit': t.unit,
+    'refLow': t.refLow,
+    'refHigh': t.refHigh,
+    'flag': flag,
+  };
+}
+
 String _normalize(String raw) {
   var s = raw
       .replaceAll('\u00A0', ' ')
-      .replaceAll('\u2212', '-') // minus
+      .replaceAll('\u2212', '-')
       .replaceAll('–', '-')
       .replaceAll('—', '-')
       .replaceAll('·', ' ')
@@ -122,20 +125,12 @@ String _normalize(String raw) {
       .replaceAll(RegExp('[ ]{2,}'), ' ')
       .trim();
 
-  // µ → u (µIU/mL → uIU/mL gibi)
   s = s.replaceAll('µ', 'u');
-
-  // 12,34 → 12.34 (ondalık virgüller)
   s = s.replaceAllMapped(RegExp(r'(\d),(\d)'), (m) => '${m[1]}.${m[2]}');
-
-  // Birim normalizasyonları
   s = s.replaceAll(RegExp(r'mg\s*[/\-]\s*dL', caseSensitive: false), 'mg/dL');
   s = s.replaceAll(RegExp(r'ug\s*/\s*L', caseSensitive: false), 'ug/L');
   s = s.replaceAll(RegExp(r'uIU\s*/\s*mL', caseSensitive: false), 'uIU/mL');
-
-  // Aralık çizgisi
   s = s.replaceAll(RegExp(r'\s*-\s*'), ' - ');
-
   return s;
 }
 
@@ -154,11 +149,21 @@ class _EnabizPageState extends State<EnabizPage> {
   Uint8List? _pdfBytes;
   bool _analyzing = false;
 
-  // ---- PDF seçimi: file_picker + doğrulama ----
   bool _looksLikePdf(Uint8List b) {
     if (b.length < 4) return false;
-    // %PDF
-    return b[0] == 0x25 && b[1] == 0x50 && b[2] == 0x44 && b[3] == 0x46;
+    return b[0] == 0x25 && b[1] == 0x50 && b[2] == 0x44 && b[3] == 0x46; // %PDF
+  }
+
+  Future<bool> _validatePdfStructure(Uint8List bytes) async {
+    try {
+      final head = String.fromCharCodes(bytes.sublist(0, min(1000, bytes.length)));
+      final hasEnabizKeywords = head.contains(
+        RegExp(r'(e.?nab[ıi]z|tahlil|laboratuvar|sonuç|rapor)', caseSensitive: false),
+      );
+      return hasEnabizKeywords;
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<void> _pickPdf() async {
@@ -166,7 +171,7 @@ class _EnabizPageState extends State<EnabizPage> {
       final res = await FilePicker.platform.pickFiles(
         type: FileType.custom,
         allowedExtensions: ['pdf'],
-        withData: true, // bytes iste
+        withData: true,
       );
       if (res == null || res.files.isEmpty) return;
 
@@ -185,20 +190,26 @@ class _EnabizPageState extends State<EnabizPage> {
         return;
       }
 
-      // Şifreli PDF kontrolü + sayfa sayısı
+      // Şifre/sayfa kontrolü
       int pages = 0;
       try {
-        final tmpDoc = PdfDocument(inputBytes: bytes /*, password: ''*/);
+        final tmpDoc = PdfDocument(inputBytes: bytes);
         pages = tmpDoc.pages.count;
         tmpDoc.dispose();
       } catch (e) {
-        // Syncfusion bazı sürümlerde özel tip export etmiyor → genel catch
         final msg = e.toString().toLowerCase();
         if (msg.contains('encrypt') || msg.contains('password')) {
           _showSnackBar("Şifreli PDF. e-Nabız'dan şifresiz export al.", isError: true);
           return;
         }
         rethrow;
+      }
+
+      final looksLikeEnabiz = await _validatePdfStructure(bytes);
+      if (!looksLikeEnabiz) {
+        _showSnackBar(
+          'Uyarı: e-Nabız anahtar kelimeleri bulunamadı, yine de deneyeceğim.',
+        );
       }
 
       setState(() {
@@ -227,100 +238,61 @@ class _EnabizPageState extends State<EnabizPage> {
     );
   }
 
+  // ---------------------- ANALİZ AKIŞI ----------------------
   Future<void> _analyzeAndSpeak() async {
     if (_pdfBytes == null) return;
     setState(() => _analyzing = true);
+
     try {
       unawaited(VoiceService.instance.speak('Analiz başlatıldı.'));
 
-      // --- A) Syncfusion ile metin
       String text = '';
       try {
         text = await compute(_extractTextInIsolate, _pdfBytes!);
-        debugPrint('Syncfusion text len: ${text.length}');
       } catch (e, st) {
-        debugPrint('Syncfusion error: $e\n$st');
+        debugPrint('Syncfusion extract error: $e\n$st');
       }
 
-      // --- B) OCR fallback (ilk 2 sayfa)
-      if (text.isEmpty) {
-        try {
-          text = await _ocrFirstPages(_pdfBytes!, pages: 2);
-          debugPrint('OCR(2) text len: ${text.length}');
-          if (mounted && text.isNotEmpty) {
-            _showSnackBar('OCR ile metin çıkarıldı (2 sayfa).');
-          }
-        } catch (e, st) {
-          debugPrint('OCR(2) error: $e\n$st');
+      List<Map<String, dynamic>> parsed = [];
+      if (text.isNotEmpty) {
+        parsed = await compute(_parseTableInIsolate, text);
+      }
+
+      if (parsed.isEmpty) {
+        final ocrText = await _enhancedOcr(_pdfBytes!, pages: 3);
+        if (ocrText.isNotEmpty) {
+          parsed = await compute(_parseTableInIsolate, ocrText);
+          if (text.isEmpty) text = ocrText;
         }
       }
 
-      // --- C) Hâlâ yoksa OCR'i 5 sayfaya yükselt
-      if (text.isEmpty) {
-        try {
-          text = await _ocrFirstPages(_pdfBytes!, pages: 5);
-          debugPrint('OCR(5) text len: ${text.length}');
-          if (mounted && text.isNotEmpty) {
-            _showSnackBar('OCR genişletildi (5 sayfa).');
-          }
-        } catch (e, st) {
-          debugPrint('OCR(5) error: $e\n$st');
-        }
+      if (parsed.isEmpty && text.isNotEmpty) {
+        parsed = await compute(_parseInIsolate, text);
       }
 
-      if (text.isEmpty) {
-        await VoiceService.instance.speak("Bu PDF'den metin çıkaramadım.");
+      if (parsed.isEmpty) {
+        await VoiceService.instance.speak(
+          "Bu PDF'den test sonuçları çıkaramadım. "
+          "Lütfen e-Nabız'dan şifresiz ve orijinal PDF formatında indirdiğinizden emin olun.",
+        );
         if (!mounted) return;
-        _showSnackBar('Metin bulunamadı (muhtemelen görüntü tabanlı PDF).', isError: true);
+        _showSnackBar('0 test bulundu. PDF şablonu farklı olabilir.', isError: true);
         return;
       }
 
-      // Özet için dilim
-      final summarySlice = text.length > 4000 ? text.substring(0, 4000) : text;
-      var parsedSummary = await compute(_parseInIsolate, summarySlice);
+      final counts = _counts(parsed);
+      final summary = _summarySentence(counts, parsed);
 
-      // Özet boşsa tüm metni parse et
-      if (parsedSummary.isEmpty) {
-        parsedSummary = await compute(_parseInIsolate, text);
-      }
-
-      // Hâlâ boşsa kullanıcıyı bilgilendir
-      if (parsedSummary.isEmpty) {
-        if (mounted) {
-          _showSnackBar('0 test bulundu. PDF şablonu farklı olabilir.', isError: true);
-        }
-        await VoiceService.instance.speak('Herhangi bir test bulamadım. PDF formatı farklı olabilir.');
-        return;
-      }
-
-      final counts = _counts(parsedSummary);
-      final summary = _summarySentence(counts, parsedSummary);
-
-      if (mounted) {
-        _showSnackBar('Özet için ${parsedSummary.length} test bulundu.');
-      }
-
-      await VoiceService.instance
-          .speak('Özet: $summary Detayları okumamı ister misiniz?');
-
+      await VoiceService.instance.speak('Özet: $summary');
       if (!mounted) return;
-      final wantDetails = await _showAnalysisDialog(summary, parsedSummary);
 
+      final wantDetails = await _showAnalysisDialog(summary, parsed);
       if (wantDetails == true) {
-        final parsedFull = parsedSummary.length >= 5
-            ? parsedSummary
-            : await compute(_parseInIsolate, text);
-
-        if (parsedFull.isNotEmpty) {
-          final details = _buildDetailsNarration(parsedFull);
-          await VoiceService.instance.speak(details);
-        } else {
-          await VoiceService.instance.speak('Detay çıkarılamadı.');
-        }
+        final details = _buildDetailsNarration(parsed);
+        await VoiceService.instance.speak(details);
       }
 
-      if (!mounted) return;
-      _showSnackBar('Analiz tamamlandı.');
+      if (mounted) _showSnackBar('Analiz tamamlandı.');
     } catch (e, st) {
       debugPrint('Analyze error: $e\n$st');
       await VoiceService.instance.speak('Analiz sırasında bir hata oluştu.');
@@ -362,11 +334,7 @@ class _EnabizPageState extends State<EnabizPage> {
                   children: [
                     const Text(
                       'Analiz Sonucu',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 24,
-                        fontWeight: FontWeight.bold,
-                      ),
+                      style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold),
                     ),
                     const SizedBox(height: 16),
                     Flexible(
@@ -385,10 +353,8 @@ class _EnabizPageState extends State<EnabizPage> {
                         _GlassButton(
                           onPressed: () => Navigator.pop(ctx, true),
                           isPrimary: true,
-                          child: const Text(
-                            'Evet, Detayları Oku',
-                            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-                          ),
+                          child: const Text('Evet, Detayları Oku',
+                              style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
                         ),
                       ],
                     ),
@@ -413,7 +379,7 @@ class _EnabizPageState extends State<EnabizPage> {
     return Scaffold(
       body: Stack(
         children: [
-          // Gradient background
+          // Background
           Container(
             decoration: const BoxDecoration(
               gradient: LinearGradient(
@@ -427,7 +393,7 @@ class _EnabizPageState extends State<EnabizPage> {
           SafeArea(
             child: Column(
               children: [
-                // Custom AppBar
+                // AppBar
                 Padding(
                   padding: const EdgeInsets.all(24),
                   child: Row(
@@ -438,14 +404,8 @@ class _EnabizPageState extends State<EnabizPage> {
                       ),
                       const SizedBox(width: 16),
                       const Expanded(
-                        child: Text(
-                          'Tahliller (PDF)',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 24,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
+                        child: Text('Tahliller (PDF)',
+                            style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold)),
                       ),
                       _GlassButton(
                         onPressed: () => VoiceService.instance.stopSpeaking(),
@@ -454,9 +414,7 @@ class _EnabizPageState extends State<EnabizPage> {
                       const SizedBox(width: 8),
                       _GlassButton(
                         onPressed: () {
-                          Navigator.of(context).push(
-                            MaterialPageRoute(builder: (_) => const SettingsPage()),
-                          );
+                          Navigator.of(context).push(MaterialPageRoute(builder: (_) => const SettingsPage()));
                         },
                         child: const Icon(Icons.settings, color: Colors.white),
                       ),
@@ -473,7 +431,7 @@ class _EnabizPageState extends State<EnabizPage> {
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            // Main Icon
+                            // Icon
                             Container(
                               width: 120,
                               height: 120,
@@ -481,31 +439,18 @@ class _EnabizPageState extends State<EnabizPage> {
                                 color: const Color(0xFFF59E0B),
                                 borderRadius: BorderRadius.circular(32),
                                 boxShadow: const [
-                                  BoxShadow(
-                                    color: Colors.black26,
-                                    blurRadius: 20,
-                                    offset: Offset(0, 8),
-                                  ),
+                                  BoxShadow(color: Colors.black26, blurRadius: 20, offset: Offset(0, 8)),
                                 ],
                               ),
-                              child: const Icon(
-                                Icons.picture_as_pdf_rounded,
-                                size: 64,
-                                color: Colors.white,
-                              ),
+                              child: const Icon(Icons.picture_as_pdf_rounded, size: 64, color: Colors.white),
                             ),
 
                             const SizedBox(height: 24),
 
-                            // Description
                             const Text(
                               "e-Nabız PDF'ini yükle",
                               textAlign: TextAlign.center,
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 24,
-                                fontWeight: FontWeight.bold,
-                              ),
+                              style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold),
                             ),
 
                             const SizedBox(height: 8),
@@ -513,16 +458,12 @@ class _EnabizPageState extends State<EnabizPage> {
                             Text(
                               'Önce özet çıkarır, onaylarsan detayları sesli anlatırım.',
                               textAlign: TextAlign.center,
-                              style: TextStyle(
-                                color: Colors.white.withOpacity(0.8),
-                                fontSize: 16,
-                                height: 1.4,
-                              ),
+                              style:
+                                  TextStyle(color: Colors.white.withOpacity(0.8), fontSize: 16, height: 1.4),
                             ),
 
                             const SizedBox(height: 32),
 
-                            // Upload Button
                             _GlassButton(
                               onPressed: _pickPdf,
                               isPrimary: true,
@@ -533,14 +474,9 @@ class _EnabizPageState extends State<EnabizPage> {
                                   children: [
                                     Icon(Icons.upload_file, color: Colors.white),
                                     SizedBox(width: 12),
-                                    Text(
-                                      'PDF Ekle',
-                                      style: TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 18,
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
+                                    Text('PDF Ekle',
+                                        style: TextStyle(
+                                            color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
                                   ],
                                 ),
                               ),
@@ -548,7 +484,7 @@ class _EnabizPageState extends State<EnabizPage> {
 
                             const SizedBox(height: 24),
 
-                            // File Info Card
+                            // -------- DOSYA KARTI --------
                             if (_fileName != null)
                               _GlassCard(
                                 child: Padding(
@@ -564,33 +500,23 @@ class _EnabizPageState extends State<EnabizPage> {
                                               color: const Color(0xFFF59E0B),
                                               borderRadius: BorderRadius.circular(12),
                                             ),
-                                            child: const Icon(
-                                              Icons.description,
-                                              color: Colors.white,
-                                              size: 24,
-                                            ),
+                                            child:
+                                                const Icon(Icons.description, color: Colors.white, size: 24),
                                           ),
                                           const SizedBox(width: 16),
                                           Expanded(
                                             child: Column(
                                               crossAxisAlignment: CrossAxisAlignment.start,
                                               children: [
-                                                Text(
-                                                  _fileName!,
-                                                  style: const TextStyle(
-                                                    color: Colors.white,
-                                                    fontSize: 16,
-                                                    fontWeight: FontWeight.bold,
-                                                  ),
-                                                ),
+                                                Text(_fileName!,
+                                                    style: const TextStyle(
+                                                        color: Colors.white,
+                                                        fontSize: 16,
+                                                        fontWeight: FontWeight.bold)),
                                                 const SizedBox(height: 4),
-                                                Text(
-                                                  '${_pageCount ?? 0} sayfa',
-                                                  style: TextStyle(
-                                                    color: Colors.white.withOpacity(0.7),
-                                                    fontSize: 14,
-                                                  ),
-                                                ),
+                                                Text('${_pageCount ?? 0} sayfa',
+                                                    style: TextStyle(
+                                                        color: Colors.white.withOpacity(0.7), fontSize: 14)),
                                               ],
                                             ),
                                           ),
@@ -610,20 +536,18 @@ class _EnabizPageState extends State<EnabizPage> {
                                                     width: 20,
                                                     child: CircularProgressIndicator(
                                                       strokeWidth: 2,
-                                                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                                                      valueColor:
+                                                          AlwaysStoppedAnimation<Color>(Colors.white),
                                                     ),
                                                   ),
                                                 )
                                               : const Padding(
                                                   padding: EdgeInsets.all(16),
-                                                  child: Text(
-                                                    'Analiz Et ve Oku',
-                                                    style: TextStyle(
-                                                      color: Colors.white,
-                                                      fontSize: 16,
-                                                      fontWeight: FontWeight.bold,
-                                                    ),
-                                                  ),
+                                                  child: Text('Analiz Et ve Oku',
+                                                      style: TextStyle(
+                                                          color: Colors.white,
+                                                          fontSize: 16,
+                                                          fontWeight: FontWeight.bold)),
                                                 ),
                                         ),
                                       ),
@@ -632,8 +556,10 @@ class _EnabizPageState extends State<EnabizPage> {
                                 ),
                               ),
 
-                            if (_analyzing) ...[
-                              const SizedBox(height: 24),
+                            const SizedBox(height: 24),
+
+                            // -------- SADECE ALTTAKİ İLERLEME --------
+                            if (_analyzing)
                               _GlassCard(
                                 child: const Padding(
                                   padding: EdgeInsets.all(20),
@@ -644,18 +570,12 @@ class _EnabizPageState extends State<EnabizPage> {
                                         valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
                                       ),
                                       SizedBox(height: 12),
-                                      Text(
-                                        'PDF analiz ediliyor...',
-                                        style: TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 14,
-                                        ),
-                                      ),
+                                      Text('PDF analiz ediliyor...',
+                                          style: TextStyle(color: Colors.white, fontSize: 14)),
                                     ],
                                   ),
                                 ),
                               ),
-                            ],
 
                             const SizedBox(height: 32),
                           ],
@@ -706,12 +626,8 @@ class _EnabizPageState extends State<EnabizPage> {
         .map((m) => '${m['name']} pozitif')
         .toList();
 
-    final top = [...topHigh, ...topLow, ...topPos]
-        .where((e) => e.trim().isNotEmpty)
-        .toList();
-    if (top.isNotEmpty) {
-      summary += ' Öne çıkanlar: ${top.join(', ')}.';
-    }
+    final top = [...topHigh, ...topLow, ...topPos].where((e) => e.trim().isNotEmpty).toList();
+    if (top.isNotEmpty) summary += ' Öne çıkanlar: ${top.join(', ')}.';
     return summary;
   }
 
@@ -771,9 +687,7 @@ class _EnabizPageState extends State<EnabizPage> {
     return buf.toString();
   }
 
-  String _unit(Map<String, dynamic> m) {
-    return (m['unit'] ?? '').toString();
-  }
+  String _unit(Map<String, dynamic> m) => (m['unit'] ?? '').toString();
 }
 
 // ==================== CUSTOM WIDGETS ====================
@@ -783,11 +697,7 @@ class _GlassCard extends StatelessWidget {
   final Color? color;
   final Color? borderColor;
 
-  const _GlassCard({
-    required this.child,
-    this.color,
-    this.borderColor,
-  });
+  const _GlassCard({required this.child, this.color, this.borderColor});
 
   @override
   Widget build(BuildContext context) {
@@ -799,17 +709,8 @@ class _GlassCard extends StatelessWidget {
           decoration: BoxDecoration(
             color: color ?? Colors.white.withOpacity(0.1),
             borderRadius: BorderRadius.circular(20),
-            border: Border.all(
-              color: borderColor ?? Colors.white.withOpacity(0.2),
-              width: 1,
-            ),
-            boxShadow: const [
-              BoxShadow(
-                color: Colors.black26,
-                blurRadius: 12,
-                offset: Offset(0, 6),
-              ),
-            ],
+            border: Border.all(color: borderColor ?? Colors.white.withOpacity(0.2), width: 1),
+            boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 12, offset: Offset(0, 6))],
           ),
           child: child,
         ),
@@ -823,11 +724,7 @@ class _GlassButton extends StatelessWidget {
   final VoidCallback? onPressed;
   final bool isPrimary;
 
-  const _GlassButton({
-    required this.child,
-    this.onPressed,
-    this.isPrimary = false,
-  });
+  const _GlassButton({required this.child, this.onPressed, this.isPrimary = false});
 
   @override
   Widget build(BuildContext context) {
@@ -837,25 +734,16 @@ class _GlassButton extends StatelessWidget {
         filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
         child: Container(
           decoration: BoxDecoration(
-            color: isPrimary
-                ? Colors.white.withOpacity(0.2)
-                : Colors.white.withOpacity(0.1),
+            color: isPrimary ? Colors.white.withOpacity(0.2) : Colors.white.withOpacity(0.1),
             borderRadius: BorderRadius.circular(16),
-            border: Border.all(
-              color: isPrimary
-                  ? Colors.white.withOpacity(0.3)
-                  : Colors.white.withOpacity(0.2),
-            ),
+            border: Border.all(color: isPrimary ? Colors.white.withOpacity(0.3) : Colors.white.withOpacity(0.2)),
           ),
           child: Material(
             color: Colors.transparent,
             child: InkWell(
               onTap: onPressed,
               borderRadius: BorderRadius.circular(16),
-              child: Container(
-                padding: const EdgeInsets.all(12),
-                child: child,
-              ),
+              child: Container(padding: const EdgeInsets.all(12), child: child),
             ),
           ),
         ),
@@ -864,15 +752,11 @@ class _GlassButton extends StatelessWidget {
   }
 }
 
-// ---------- Debug: Analiz önizleme ----------
 class _AnalysisPreview extends StatelessWidget {
   final String summary;
   final List<Map<String, dynamic>> parsed;
 
-  const _AnalysisPreview({
-    required this.summary,
-    required this.parsed,
-  });
+  const _AnalysisPreview({required this.summary, required this.parsed});
 
   Color _flagColor(String f) {
     switch (f) {
@@ -904,25 +788,12 @@ class _AnalysisPreview extends StatelessWidget {
             borderRadius: BorderRadius.circular(12),
             border: Border.all(color: Colors.white.withOpacity(0.2)),
           ),
-          child: Text(
-            summary,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 16,
-              height: 1.4,
-            ),
-          ),
+          child: Text(summary, style: const TextStyle(color: Colors.white, fontSize: 16, height: 1.4)),
         ),
         const SizedBox(height: 16),
         if (parsed.isNotEmpty) ...[
-          const Text(
-            'Test Detayları:',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
+          const Text('Test Detayları:',
+              style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
           Container(
             constraints: const BoxConstraints(maxHeight: 200),
@@ -948,24 +819,16 @@ class _AnalysisPreview extends StatelessWidget {
                       Container(
                         width: 8,
                         height: 8,
-                        decoration: BoxDecoration(
-                          color: _flagColor(m['flag'] as String),
-                          shape: BoxShape.circle,
-                        ),
+                        decoration: BoxDecoration(color: _flagColor(m['flag'] as String), shape: BoxShape.circle),
                       ),
                       const SizedBox(width: 12),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(
-                              m['name'] as String,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 14,
-                              ),
-                            ),
+                            Text(m['name'] as String,
+                                style: const TextStyle(
+                                    color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14)),
                             const SizedBox(height: 2),
                             Text(
                               [
@@ -974,10 +837,7 @@ class _AnalysisPreview extends StatelessWidget {
                                 if (m['refLow'] != null && m['refHigh'] != null)
                                   'Ref: ${m['refLow']}–${m['refHigh']} ${m['unit'] ?? ''}',
                               ].join(' • '),
-                              style: TextStyle(
-                                color: Colors.white.withOpacity(0.8),
-                                fontSize: 12,
-                              ),
+                              style: TextStyle(color: Colors.white.withOpacity(0.8), fontSize: 12),
                             ),
                           ],
                         ),

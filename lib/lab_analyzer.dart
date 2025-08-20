@@ -38,8 +38,8 @@ class LabReport {
       highs + lows + positives + tests.where((t) => t.flag == LabFlag.borderline).length;
 
   List<LabTest> get highTests => tests.where((t) => t.flag == LabFlag.high).toList();
-  List<LabTest> get lowTests  => tests.where((t) => t.flag == LabFlag.low).toList();
-  List<LabTest> get posTests  => tests.where((t) => t.flag == LabFlag.positive).toList();
+  List<LabTest> get lowTests => tests.where((t) => t.flag == LabFlag.low).toList();
+  List<LabTest> get posTests => tests.where((t) => t.flag == LabFlag.positive).toList();
 }
 
 class LabAnalyzer {
@@ -321,5 +321,129 @@ class LabAnalyzer {
     }
 
     return LabReport(byName.values.toList());
+  }
+}
+
+// ========== e-NABIZ TABLO PARSERI ==========
+/// e-Nabız'dan indirilen PDF'lerin TABLO formatını özel olarak parse eder.
+/// "| Test Adı | Sonuç | Birim | Referans |" şeklindeki satırları arar.
+class EnabizTableParser {
+  static final RegExp _tableRowRegex = RegExp(
+    r'^\s*\|?\s*(.*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*(?:\|.*)?$',
+    multiLine: false,
+  );
+
+  static LabReport parseTable(String rawText) {
+    final text = LabAnalyzer._norm(rawText);
+    final lines = text.split('\n').map((line) => line.trim()).where((line) => line.isNotEmpty);
+
+    final foundTests = <LabTest>[];
+
+    for (final line in lines) {
+      // Satırın bir tablo satırı olup olmadığını kontrol et (| işaretleriyle ayrılmış mı)
+      final match = _tableRowRegex.firstMatch(line);
+      if (match == null) continue;
+
+      final String testNameCell = match.group(1) ?? '';
+      final String resultCell = match.group(2) ?? '';
+      final String unitCell = match.group(3) ?? '';
+      final String referenceCell = match.group(4) ?? '';
+
+      // Hücrelerden gereksiz "|", "-", ve tekrarlayan boşlukları temizle
+      String cleanName = testNameCell.replaceAll(RegExp(r'^\s*[-|]\s*'), '').trim();
+      final cleanResult = resultCell.trim();
+      final cleanUnit = unitCell.trim();
+      String cleanReference = referenceCell.trim();
+
+      // Test adı boşsa veya "Tarih", "Tahlil" gibi başlık satırıysa atla
+      if (cleanName.isEmpty ||
+          cleanName == 'Tarih' ||
+          cleanName == 'Tahlil' ||
+          cleanName.contains('Referans Değeri') ||
+          cleanName.contains('Sonuç Birimi')) {
+        continue;
+      }
+
+      // Test adındaki gereksiz tekrarları temizle (örn: "Hemoglobin (Hb) Hemoglobin (Hb)" -> "Hemoglobin (Hb)")
+      cleanName = cleanName.replaceAllMapped(RegExp(r'(.+?)(?:\s+\1)+'), (match) => match.group(1) ?? '').trim();
+
+      // Değeri sayıya çevirmeye çalış (12.1, <0.01, Negatif 2)
+      double? numericValue;
+      String? op;
+      final numericMatch = RegExp(r'(?<op>[<>]?)\s*(?<val>\d+[.,]?\d*)').firstMatch(cleanResult);
+      if (numericMatch != null) {
+        op = numericMatch.namedGroup('op');
+        if (op != null && op.isEmpty) op = null;
+        final valStr = numericMatch.namedGroup('val')?.replaceAll(',', '.');
+        numericValue = double.tryParse(valStr ?? '');
+      }
+
+      // Referans aralığını parçala (örn: "12.3 - 15.3", "<0.3", "0 - 10 - Negatif ...")
+      String? refLow;
+      String? refHigh;
+      final rangeMatch = RegExp(r'([<>]?)\s*(\d+[.,]?\d*)\s*[-–]\s*([<>]?)\s*(\d+[.,]?\d*)').firstMatch(cleanReference);
+      final singleRefMatch = RegExp(r'([<>]?)\s*(\d+[.,]?\d*)').firstMatch(cleanReference);
+
+      if (rangeMatch != null) {
+        refLow = (rangeMatch.group(1)?.isNotEmpty ?? false) ? '${rangeMatch.group(1)}${rangeMatch.group(2)}' : rangeMatch.group(2);
+        refHigh = (rangeMatch.group(3)?.isNotEmpty ?? false) ? '${rangeMatch.group(3)}${rangeMatch.group(4)}' : rangeMatch.group(4);
+      } else if (singleRefMatch != null) {
+        // Tek sınırlı referans (örn: "<0.3")
+        final singleOp = singleRefMatch.group(1);
+        final singleVal = singleRefMatch.group(2);
+        if (singleOp == '<' || singleOp == '≤') {
+          refHigh = '$singleOp$singleVal';
+        } else if (singleOp == '>' || singleOp == '≥') {
+          refLow = '$singleOp$singleVal';
+        }
+      }
+
+      // Seroloji ve özel durumlar için flag belirle
+      LabFlag flag = LabFlag.unknown;
+      final lowerResult = cleanResult.toLowerCase();
+      final lowerRef = cleanReference.toLowerCase();
+
+      if (lowerResult.contains('negatif') || lowerRef.contains('negatif')) {
+        flag = LabFlag.normal;
+      } else if (lowerResult.contains('pozitif') || lowerRef.contains('pozitif')) {
+        flag = LabFlag.positive;
+      } else if (lowerResult.contains('borderline') || lowerRef.contains('borderline') || lowerRef.contains('şüpheli')) {
+        flag = LabFlag.borderline;
+      } else {
+        // Sayısal değerler için flag hesapla
+        flag = LabAnalyzer._flagForNumeric(
+          value: numericValue,
+          op: op,
+          low: LabAnalyzer._toDouble(refLow),
+          high: LabAnalyzer._toDouble(refHigh),
+        );
+      }
+
+      // Testi listeye ekle
+      foundTests.add(LabTest(
+        name: cleanName,
+        value: numericValue,
+        refLow: refLow,
+        refHigh: refHigh,
+        unit: cleanUnit.isNotEmpty ? cleanUnit : null,
+        op: op,
+        flag: flag,
+        raw: line,
+      ));
+    }
+
+    // Aynı isimdeki testleri birleştir (tabloda tekrarlanmış olabilir)
+    final uniqueTests = <String, LabTest>{};
+    for (final test in foundTests) {
+      final existing = uniqueTests[test.name];
+      if (existing == null || // İlk kez görülüyorsa ekle
+          (test.value != null && existing.value == null) || // Yeni değer daha iyiyse
+          (test.refLow != null && existing.refLow == null) || // Yeni referans daha iyiyse
+          (test.refHigh != null && existing.refHigh == null)) {
+        uniqueTests[test.name] = test;
+      }
+    }
+
+    return LabReport(uniqueTests.values.toList());
   }
 }
