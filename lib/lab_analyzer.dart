@@ -1,449 +1,783 @@
-// lib/lab_analyzer.dart
-import 'dart:math';
-import 'dart:collection';
+// lib/enabiz.dart
+import 'dart:io';
+import 'dart:math' show min;
+import 'dart:typed_data';
+import 'dart:ui';
 
-enum LabFlag { low, normal, high, positive, borderline, unknown }
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_tts/flutter_tts.dart';
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:pdfx/pdfx.dart' as pdfx;
 
-class LabTest {
-  final String name;
-  final double? value;
-  final String? refLow;
-  final String? refHigh;
-  final String? unit;
-  final String? op; // '<', '>', '≥', '≤', veya null
-  final LabFlag flag;
-  final String raw;
+// ÖNEMLİ: bu dosya projende zaten var
+import 'lab_analyzer.dart' as la;
 
-  LabTest({
-    required this.name,
-    required this.value,
-    required this.refLow,
-    required this.refHigh,
-    required this.unit,
-    required this.op,
-    required this.flag,
-    required this.raw,
-  });
+class EnabizPage extends StatefulWidget {
+  const EnabizPage({super.key});
+  @override
+  State<EnabizPage> createState() => _EnabizPageState();
 }
 
-class LabReport {
-  final List<LabTest> tests;
-  LabReport(this.tests);
+class _EnabizPageState extends State<EnabizPage> {
+  // ---- TTS hızları ----
+  static const double _rateGeneral = 0.85; // genel
+  static const double _rateSummary = 0.80; // özet
+  static const double _rateDetails = 0.72; // bulgular (yavaş)
 
-  int get total => tests.length;
-  int get highs => tests.where((t) => t.flag == LabFlag.high).length;
-  int get lows => tests.where((t) => t.flag == LabFlag.low).length;
-  int get positives => tests.where((t) => t.flag == LabFlag.positive).length;
-  int get abnormals =>
-      highs + lows + positives + tests.where((t) => t.flag == LabFlag.borderline).length;
+  // ---- State ----
+  String? _fileName;
+  Uint8List? _pdfBytes;
+  bool _busy = false;
+  double _progress = 0;
+  String _rawText = '';
+  la.LabReport? _report;
+  List<la.LabTest> _tests = [];
 
-  List<LabTest> get highTests => tests.where((t) => t.flag == LabFlag.high).toList();
-  List<LabTest> get lowTests => tests.where((t) => t.flag == LabFlag.low).toList();
-  List<LabTest> get posTests => tests.where((t) => t.flag == LabFlag.positive).toList();
-}
+  // ---- TTS ----
+  final _tts = FlutterTts();
+  bool _speaking = false;
 
-class LabAnalyzer {
-  // --- Ad/alias havuzu (genişletilebilir) ---
-  static final Map<String, List<String>> _aliases = {
-    'Hemoglobin': ['Hemoglobin', r'\bHGB\b', r'\bHb\b'],
-    'Hematokrit': ['Hematokrit', r'\bHCT\b'],
-    'WBC': [r'\bWBC\b', 'Lökosit'],
-    'RBC': [r'\bRBC\b', 'Eritrosit'],
-    'Trombosit': ['Trombosit', r'\bPLT\b'],
-    'RDW-CV': [r'\bRDW(?:-CV)?\b', 'RDW CV'],
-    'MPV': [r'\bMPV\b'],
-    'MCV': [r'\bMCV\b'],
-    'MCHC': [r'\bMCHC\b'],
-    'MCH': [r'\bMCH\b'],
-    'Glukoz': ['Glukoz', 'Açlık Kan Şekeri', 'Glucose', r'\bFBG\b'],
-    'HbA1c': [r'\bHbA1c\b', 'Glike hemoglobin'],
-    'ALT': [r'\bALT\b', 'ALAT', 'Alanin aminotransferaz'],
-    'AST': [r'\bAST\b', 'ASAT', 'Aspartat transaminaz'],
-    'ALP': [r'\bALP\b'],
-    'GGT': [r'\bGGT\b', 'Gamma glutamil transferaz'],
-    'Kreatinin': ['Kreatinin', 'Creatinine'],
-    'Üre': ['Üre'],
-    'Ürik asit': ['Ürik asit', 'Uric acid'],
-    'Sodyum': ['Sodyum', r'\bNa\b'],
-    'Potasyum': ['Potasyum', r'\bK\b'],
-    'Kalsiyum': ['Kalsiyum', r'\bCa\b'],
-    'Fosfor': ['Fosfor', r'\bP\b'],
-    'TSH': [r'\bTSH\b'],
-    'Serbest T4': [r'\bSerbest\s*T4\b', r'\bFT4\b'],
-    'Serbest T3': [r'\bSerbest\s*T3\b', r'\bFT3\b'],
-    'eGFR': [r'Glomer[üu]l Filtrasyon H[ıi]z[ıi]', r'\beGFR\b', r'CKD-EPI'],
-    'CRP': [r'\bCRP\b', 'C reaktif protein'],
-    'LDL': ['LDL kolesterol', r'\bLDL\b'],
-    'HDL': ['HDL kolesterol', r'\bHDL\b'],
-    'Trigliserid': ['Trigliserid', 'Triglycerid'],
-    'Kolesterol': ['Kolesterol', 'Total Kolesterol'],
-    'Vitamin B12': ['Vitamin B12', r'\bB12\b'],
-    'Ferritin': ['Ferritin'],
-    'Demir': ['Demir (serum)', r'\bDemir\b', r'\bFe\b'],
-    'TDBK': ['Demir bağlama kapasitesi', r'\bTDBK\b'],
-    // Seroloji
-    'HBsAg': [r'\bHBsAg\b'],
-    'Anti HBs': [r'Anti\s*HBs'],
-    'Anti HCV': [r'Anti\s*HCV'],
-    'Anti HIV': [r'Anti\s*HIV'],
-  };
+  // ---- Cache'ler ----
+  String? _cachedSummaryText;
+  String? _cachedDetailsText;
 
-  // Hematoloji birimleri + sık varyantlar
-  static final RegExp _unitRe = RegExp(
-    r'(g/dL|mg/dL|mmol/L|m?IU/mL|µ?IU/mL|ng/dL|ng/L|µg/L|U/L|IU/L|mg/L|pg/mL|fL|%|mL/dk/1\.73|'
-    r'(?:10\^?[36]|10e[36]|x?10[³⁶])/?[µuU]?L|COI|mmol/?L)',
-    caseSensitive: false,
-  );
-
-  static String _norm(String s) => s
-      .replaceAll('\u2212', '-') // minus
-      .replaceAll('–', '-')
-      .replaceAll('—', '-')
-      .replaceAll(',', '.')
-      .replaceAll('\t', ' ')
-      .replaceAll(RegExp(' +'), ' ')
-      .trim();
-
-  static double? _toDouble(String? s) {
-    if (s == null) return null;
-    final t = s.replaceAll(' ', '').replaceAll(',', '.');
-    return double.tryParse(t);
+  @override
+  void initState() {
+    super.initState();
+    _initTts();
   }
 
-  static String _canonicalName(String matched) {
-    for (final entry in _aliases.entries) {
-      for (final a in entry.value) {
-        final re = RegExp(a, caseSensitive: false);
-        if (re.hasMatch(matched)) return entry.key;
+  @override
+  void didUpdateWidget(covariant EnabizPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Testler değiştiğinde cache'leri temizle
+    _cachedSummaryText = null;
+    _cachedDetailsText = null;
+  }
+
+  Future<void> _initTts() async {
+    try {
+      await _tts.setLanguage("tr-TR");
+      await _tts.setSpeechRate(_rateGeneral);
+      await _tts.setPitch(1.0);
+      await _tts.awaitSpeakCompletion(true);
+      _tts.setStartHandler(() => setState(() => _speaking = true));
+      _tts.setCompletionHandler(() => setState(() => _speaking = false));
+      _tts.setCancelHandler(() => setState(() => _speaking = false));
+    } catch (e) {
+      debugPrint('TTS init hatası: $e');
+    }
+  }
+
+  Future<void> _stopTts() async {
+    try {
+      await _tts.stop();
+      if (mounted) setState(() => _speaking = false);
+    } catch (e) {
+      debugPrint('TTS stop hatası: $e');
+    }
+  }
+
+  // ---- File pick ----
+  Future<void> _pickPdf() async {
+    try {
+      final res = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const ['pdf'],
+        withData: true,
+      );
+      if (res == null || res.files.isEmpty) return;
+
+      final f = res.files.single;
+      Uint8List? bytes = f.bytes;
+      if (bytes == null && f.path != null) {
+        bytes = await File(f.path!).readAsBytes();
       }
-    }
-    return matched.trim();
-  }
-
-  static LabFlag _flagForNumeric({
-    required double? value,
-    required String? op,
-    required double? low,
-    required double? high,
-  }) {
-    if (value == null && op == null) return LabFlag.unknown;
-
-    // Tek sınır (örn. "Ref < 37", "Ref > 10")
-    if (low == null && high != null) {
-      if (value != null && value > high) return LabFlag.high;
-      if (op == '<' || op == '≤') return LabFlag.normal;
-      return LabFlag.normal;
-    }
-    if (low != null && high == null) {
-      if (value != null && value < low) return LabFlag.low;
-      if (op == '>' || op == '≥') return LabFlag.normal;
-      return LabFlag.normal;
-    }
-
-    // Aralık
-    if (low != null && high != null && value != null) {
-      if (value < low) return LabFlag.low;
-      if (value > high) return LabFlag.high;
-      return LabFlag.normal;
-    }
-    return LabFlag.unknown;
-  }
-
-  // -------- Seroloji / COI özel kuralları + dil varyantları --------
-  static LabFlag _flagSerology(String name, String line, double? value) {
-    final l = line.toLowerCase();
-
-    final isNeg = l.contains('negatif') || l.contains('non-reaktif') || l.contains('nonreaktif');
-    final isPos = l.contains('pozitif') || l.contains('reaktif');
-    final isBorder = l.contains('borderline') || l.contains('şüpheli');
-    final isNone = l.contains('saptanmadı') || l.contains('tespit edilemedi') || l.contains('non detected');
-
-    // Cut-off / COI eşiği: "cut off", "cut-off", "cutoff"
-    final cut = RegExp(r'cut[- ]?off[^0-9]*([0-9]+(?:[.,][0-9]+)?)', caseSensitive: false).firstMatch(line);
-    final cutVal = _toDouble(cut?.group(1));
-
-    bool coiPositive(double v) {
-      final threshold = cutVal ?? 1.0;
-      return v >= threshold;
-    }
-
-    if (RegExp(r'anti\s*hbs', caseSensitive: false).hasMatch(name)) {
-      if (value != null && value > 10) return LabFlag.positive;
-      if (isPos) return LabFlag.positive;
-      if (isBorder) return LabFlag.borderline;
-      if (isNeg || isNone) return LabFlag.normal;
-    }
-
-    if (RegExp(r'hbsag', caseSensitive: false).hasMatch(name)) {
-      if (value != null && l.contains('coi') && coiPositive(value)) return LabFlag.positive;
-      if (isPos) return LabFlag.positive;
-      if (isBorder) return LabFlag.borderline;
-      if (isNeg || isNone) return LabFlag.normal;
-    }
-
-    if (RegExp(r'anti\s*hcv', caseSensitive: false).hasMatch(name) ||
-        RegExp(r'anti\s*hiv', caseSensitive: false).hasMatch(name)) {
-      if (value != null && l.contains('coi') && coiPositive(value)) return LabFlag.positive;
-      if (isPos) return LabFlag.positive;
-      if (isBorder) return LabFlag.borderline;
-      if (isNeg || isNone) return LabFlag.normal;
-    }
-
-    return LabFlag.unknown;
-  }
-
-  // --- Desenleri alias başına 1 kez derleyip önbelleğe alalım ---
-  static final Map<String, List<RegExp>> _compiledPatterns = () {
-    const valR = r'(?:(?<op>[<>]|≥|≤)\s*)?(?<val>\d+(?:[.,]\d+)?)';
-    const numR = r'(\d+(?:[.,]\d+)?)';
-    const rngR = '$numR\\s*[-]\\s*$numR';
-
-    const refKW =
-        r'(?:Ref(?:\.|erans)?(?:\s*(?:Değer(?:ler)?|Aral[ıi]k))?|Normal(?:\s*Aral[ıi]k)?|Aral[ıi]k|Min\s*-\s*Max|MinMax|Alt\s*-\s*Üst|Sınır(?:lar)?)';
-
-    final unitR = '(${_unitRe.pattern})?';
-
-    List<RegExp> make(String alias) => [
-          RegExp('($alias)[^\\n]*?$valR\\s*$unitR[^\\n]*?$refKW\\s*[:\\-]?\\s*$rngR',
-              caseSensitive: false),
-          RegExp('($alias)[^\\n]*?$refKW\\s*[:\\-]?\\s*$rngR[^\\n]*?$valR\\s*$unitR',
-              caseSensitive: false),
-          RegExp('($alias)[^\\n]*?$valR\\s*$unitR[^\\n]*?\\(\\s*$rngR\\s*\\)',
-              caseSensitive: false),
-          RegExp('($alias)[^\\n]*?\\(\\s*$rngR\\s*\\)[^\\n]*?$valR\\s*$unitR',
-              caseSensitive: false),
-          RegExp('($alias)[^\\n]*?$valR\\s*$unitR[^\\n]*?(?:$refKW|<|>|≤|≥)\\s*[:\\-]?\\s*(?:[<>]|≥|≤)?\\s*$numR',
-              caseSensitive: false),
-          RegExp('($alias)[^\\n]*?$valR\\s*$unitR', caseSensitive: false),
-        ];
-
-    final map = <String, List<RegExp>>{};
-    for (final aliases in _aliases.values) {
-      for (final a in aliases) {
-        map[a] = make(a);
+      if (bytes == null) {
+        _snack('Dosya okunamadı.', err: true);
+        return;
       }
+
+      setState(() {
+        _fileName = f.name;
+        _pdfBytes = bytes;
+        _rawText = '';
+        _tests = [];
+        _report = null;
+        _progress = 0;
+        _cachedSummaryText = null;
+        _cachedDetailsText = null;
+      });
+
+      _snack('PDF seçildi: ${f.name}');
+    } catch (e) {
+      _snack('PDF seçilemedi: $e', err: true);
     }
-    return map;
-  }();
+  }
 
-  static LabReport parse(String rawText) {
-    final text = _norm(rawText);
-    final lines = text
-        .split(RegExp(r'\n+'))
-        .map(_norm)
-        .where((e) => e.isNotEmpty && e.length > 2);
+  // ---- OCR + PARSE (LabAnalyzer ile) ----
+  Future<void> _runOcr() async {
+    if (_pdfBytes == null) return;
 
-    final found = <LabTest>[];
+    setState(() {
+      _busy = true;
+      _rawText = '';
+      _tests = [];
+      _report = null;
+      _progress = 0;
+      _cachedSummaryText = null;
+      _cachedDetailsText = null;
+    });
 
-    for (final line in lines) {
-      bool matchedAny = false;
-      for (final aliases in _aliases.values) {
-        for (final alias in aliases) {
-          final pats = _compiledPatterns[alias]!;
-          for (final p in pats) {
-            final m = p.firstMatch(line);
-            if (m == null) continue;
+    final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
+    pdfx.PdfDocument? doc;
 
-            final matchedName = m.group(1) ?? alias;
-            final name = _canonicalName(matchedName);
+    try {
+      doc = await pdfx.PdfDocument.openData(_pdfBytes!);
+      final pageCount = min(3, doc.pagesCount); // ilk 3 sayfa genelde yeter
+      final buf = StringBuffer();
 
-            // Değer / op
-            final op = m.namedGroup('op');
-            final valStr = m.namedGroup('val');
-            final val = _toDouble(valStr);
+      for (var i = 1; i <= pageCount; i++) {
+        if (!mounted) break; // Widget dispose olmuşsa işlemi durdur
 
-            // Birim
-            final um = _unitRe.firstMatch(line);
-            final unit = um?.group(0);
+        final page = await doc.getPage(i);
+        try {
+          final img = await page.render(
+            width: page.width * 1.9,
+            height: page.height * 1.9,
+            format: pdfx.PdfPageImageFormat.png,
+          );
 
-            // Referans: aralık veya tek sınır
-            String? refLow, refHigh;
-            final rng = RegExp(r'(\d+(?:[.,]\d+)?)\s*-\s*(\d+(?:[.,]\d+)?)').firstMatch(line);
-            if (rng != null) {
-              refLow = rng.group(1);
-              refHigh = rng.group(2);
-            } else {
-              final one = RegExp(r'(<|>|≤|≥)\s*(\d+(?:[.,]\d+)?)').firstMatch(line);
-              if (one != null) {
-                final sym = (one.group(1) ?? '').trim();
-                if (sym == '<' || sym == '≤') {
-                  refHigh = one.group(2);
-                } else {
-                  refLow = one.group(2);
-                }
-              }
+          if (img != null) {
+            final tmp = await File('${Directory.systemTemp.path}/enabiz_ocr_$i.png').create();
+            await tmp.writeAsBytes(img.bytes, flush: true);
+
+            final input = InputImage.fromFilePath(tmp.path);
+            final result = await recognizer.processImage(input);
+
+            if (result.text.isNotEmpty) {
+              buf.writeln('=== SAYFA $i ===');
+              buf.writeln(result.text);
+              buf.writeln();
             }
 
-            // Seroloji kontrolü
-            var flag = _flagSerology(name, line, val);
-            if (flag == LabFlag.unknown) {
-              flag = _flagForNumeric(
-                value: val,
-                op: op,
-                low: _toDouble(refLow),
-                high: _toDouble(refHigh),
-              );
-            }
-
-            found.add(LabTest(
-              name: name,
-              value: val,
-              refLow: refLow,
-              refHigh: refHigh,
-              unit: unit,
-              op: op,
-              flag: flag,
-              raw: line,
-            ));
-
-            matchedAny = true;
-            break; // aynı satırda tekrar eşleşme yapma
+            // Geçici dosyayı temizle
+            await tmp.delete();
           }
-          if (matchedAny) break;
+        } finally {
+          await page.close();
+          if (mounted) setState(() => _progress = i / pageCount);
         }
-        if (matchedAny) break;
       }
-    }
 
-    // Aynı isimden birden fazla varsa "daha zengin" olanı seç
-    final byName = LinkedHashMap<String, LabTest>(); // ekleme sırasını koru
-    for (final t in found) {
-      final prev = byName[t.name];
-      if (prev == null) {
-        byName[t.name] = t;
+      if (!mounted) return; // Widget dispose olmuşsa devam etme
+
+      final raw = _normalize(buf.toString());
+
+      // 1) Tablo dene
+      final tableReport = la.EnabizTableParser.parseTable(raw);
+      // 2) Olmazsa serbest metin
+      final report = (tableReport.tests.isNotEmpty)
+          ? tableReport
+          : la.LabAnalyzer.parse(raw);
+
+      setState(() {
+        _rawText = raw;
+        _report = report;
+        _tests = report.tests;
+      });
+
+      if (_tests.isEmpty) {
+        _snack('OCR tamam ama test/parsing başarısız. PDF düzeni farklı olabilir.', err: true);
       } else {
-        final prevScore =
-            (prev.refLow != null || prev.refHigh != null ? 2 : 0) + (prev.unit != null ? 1 : 0);
-        final curScore =
-            (t.refLow != null || t.refHigh != null ? 2 : 0) + (t.unit != null ? 1 : 0);
-        if (curScore >= prevScore) byName[t.name] = t;
+        _snack('OCR + analiz tamam: ${_tests.length} test.');
       }
+    } catch (e) {
+      if (mounted) _snack('OCR hata: $e', err: true);
+    } finally {
+      await recognizer.close();
+      await doc?.close();
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  // ---- Yardımcılar (format/normalize) ----
+  static String _normalize(String raw) {
+    // Önce tüm özel karakterleri normalize et
+    final replacements = {
+      '\u00A0': ' ',
+      '\u2212': '-',
+      '–': '-',
+      '—': '-',
+      '·': ' ',
+      '•': ' ',
+      '\r': ' ',
+      '\t': ' ',
+      'µ': 'u',
+      'μ': 'u',
+      'ı': 'i',
+      'İ': 'I',
+      'ş': 's',
+      'Ş': 'S',
+      'ğ': 'g',
+      'Ğ': 'G',
+      'ç': 'c',
+      'Ç': 'C',
+      'ö': 'o',
+      'Ö': 'O',
+      'ü': 'u',
+      'Ü': 'U'
+    };
+
+    String result = raw;
+    replacements.forEach((key, value) {
+      result = result.replaceAll(key, value);
+    });
+
+    // Fazla boşlukları temizle
+    result = result.replaceAll(RegExp('[ ]{2,}'), ' ').trim();
+
+    // Virgülleri noktaya çevir (ondalık sayılar için)
+    result = result.replaceAllMapped(RegExp(r'(\d),(\d)'), (m) => '${m[1]}.${m[2]}');
+
+    return result;
+  }
+
+  String _valueStr(la.LabTest t) {
+    final op = (t.op ?? '').trim();
+    final v = t.value?.toString() ?? '';
+    if (op.isEmpty && v.isEmpty) return '';
+    return op.isEmpty ? v : '$op $v';
+  }
+
+  String _refStr(la.LabTest t) {
+    final lo = t.refLow, hi = t.refHigh;
+    final unit = (t.unit ?? '').isNotEmpty ? ' ${t.unit}' : '';
+    if (lo != null && hi != null && lo.isNotEmpty && hi.isNotEmpty) {
+      return '$lo – $hi$unit';
+    }
+    if (hi != null && hi.isNotEmpty) return '≤ $hi$unit';
+    if (lo != null && lo.isNotEmpty) return '≥ $lo$unit';
+    return '—';
+  }
+
+  // ---- TTS metinleri (cache'li) ----
+  String _summaryText() {
+    if (_cachedSummaryText != null) return _cachedSummaryText!;
+    
+    if (_report == null || _tests.isEmpty) return 'Herhangi bir test okunamadı.';
+
+    final r = _report!;
+    final highs = r.highs;
+    final lows = r.lows;
+    final normals = r.total - highs - lows - r.positives - r.tests.where((t) => t.flag == la.LabFlag.borderline).length;
+
+    final buf = StringBuffer();
+    buf.write('Toplam ${r.total} test var. ');
+    buf.write('$highs yüksek, $lows düşük, $normals normal. ');
+
+    // Referans dışı: high + low + positive + borderline
+    final out = r.tests.where((t) =>
+      t.flag == la.LabFlag.high ||
+      t.flag == la.LabFlag.low ||
+      t.flag == la.LabFlag.positive ||
+      t.flag == la.LabFlag.borderline).toList();
+
+    if (out.isNotEmpty) {
+      buf.write('Referans dışı ${out.length} sonuç: ');
+      buf.write(out.take(5).map((t) {
+        final val = _valueStr(t);
+        final unit = (t.unit ?? '').isNotEmpty ? ' ${t.unit}' : '';
+        final ref = _refStr(t);
+        final status = _flagLabel(t.flag);
+        return '${t.name}: $val$unit ($status, referans $ref)';
+      }).join(', '));
+      if (out.length > 5) buf.write(', ve ${out.length - 5} sonuç daha.');
     }
 
-    return LabReport(byName.values.toList());
+    _cachedSummaryText = buf.toString().trim();
+    return _cachedSummaryText!;
+  }
+
+  String _detailsText() {
+    if (_cachedDetailsText != null) return _cachedDetailsText!;
+    
+    if (_tests.isEmpty) return 'Detay yok.';
+    
+    String line(la.LabTest t) {
+      final val = _valueStr(t);
+      final unit = (t.unit ?? '').isNotEmpty ? ' ${t.unit}' : '';
+      final ref = _refStr(t);
+      final status = _flagLabel(t.flag);
+      return '${t.name}: $val$unit. Durum: $status. Referans: $ref.';
+    }
+
+    final buf = StringBuffer();
+
+    final highs = _tests.where((e) => e.flag == la.LabFlag.high).toList();
+    final lows  = _tests.where((e) => e.flag == la.LabFlag.low).toList();
+    final pos   = _tests.where((e) => e.flag == la.LabFlag.positive).toList();
+    final bor   = _tests.where((e) => e.flag == la.LabFlag.borderline).toList();
+    final norms = _tests.where((e) => e.flag == la.LabFlag.normal).toList();
+
+    if (pos.isNotEmpty) {
+      buf.writeln('Pozitif olanlar:');
+      for (final e in pos) buf.writeln(line(e));
+      buf.writeln();
+    }
+    if (bor.isNotEmpty) {
+      buf.writeln('Sınırda olanlar:');
+      for (final e in bor) buf.writeln(line(e));
+      buf.writeln();
+    }
+    if (highs.isNotEmpty) {
+      buf.writeln('Yüksek olanlar:');
+      for (final e in highs) buf.writeln(line(e));
+      buf.writeln();
+    }
+    if (lows.isNotEmpty) {
+      buf.writeln('Düşük olanlar:');
+      for (final e in lows) buf.writeln(line(e));
+      buf.writeln();
+    }
+    if (norms.isNotEmpty) {
+      buf.writeln('Normal olanlardan örnekler:');
+      for (final e in norms.take(5)) buf.writeln(line(e));
+    }
+
+    _cachedDetailsText = buf.toString().trim();
+    return _cachedDetailsText!;
+  }
+
+  Future<void> _speakSummary() async {
+    if (_tests.isEmpty) return;
+    try {
+      await _tts.setSpeechRate(_rateSummary);
+      await _tts.speak(_summaryText());
+    } catch (e) {
+      _snack('Seslendirme hatası: $e', err: true);
+    }
+  }
+
+  Future<void> _speakDetails() async {
+    if (_tests.isEmpty) return;
+    try {
+      await _tts.setSpeechRate(_rateDetails);
+      await _tts.speak(_detailsText());
+    } catch (e) {
+      _snack('Seslendirme hatası: $e', err: true);
+    }
+  }
+
+  void _snack(String msg, {bool err = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        backgroundColor: err ? Colors.red.shade600 : Colors.green.shade700,
+        duration: const Duration(seconds: 3),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _stopTts();
+    super.dispose();
+  }
+
+  // ---- UI ----
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Stack(
+        children: [
+          // Gradient arka plan
+          Container(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [Color(0xFF334155), Color(0xFF1E3A8A), Color(0xFF1E40AF)],
+              ),
+            ),
+          ),
+
+          SafeArea(
+            child: Column(
+              children: [
+                // Üst bar
+                _buildAppBar(),
+                
+                // İçerik
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: SingleChildScrollView(
+                      child: Column(
+                        children: [
+                          // Dosya seç + OCR başlat
+                          _buildFileSection(),
+                          
+                          if (_tests.isNotEmpty) ...[
+                            const SizedBox(height: 16),
+                            _buildSummarySection(),
+                            const SizedBox(height: 12),
+                            _buildTestListSection(),
+                          ],
+                          
+                          if (_rawText.isNotEmpty) ...[
+                            const SizedBox(height: 12),
+                            _buildRawTextSection(),
+                          ],
+                          
+                          const SizedBox(height: 24),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ---- UI Bileşenleri ----
+  Widget _buildAppBar() {
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Row(
+        children: [
+          _GlassButton(
+            onPressed: () {
+              _stopTts();
+              Navigator.of(context).maybePop();
+            },
+            child: const Icon(Icons.arrow_back, color: Colors.white),
+          ),
+          const SizedBox(width: 12),
+          const Expanded(
+            child: Text(
+              'Tahliller (PDF → OCR)',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 22,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+          _GlassButton(
+            onPressed: _speaking ? _stopTts : null,
+            child: const Icon(Icons.stop_circle_outlined, color: Colors.white),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFileSection() {
+    return _GlassCard(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    _fileName ?? 'PDF seçilmedi',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  if (_busy) ...[
+                    const SizedBox(height: 8),
+                    LinearProgressIndicator(
+                      backgroundColor: Colors.white24,
+                      value: _progress == 0 ? null : _progress,
+                      valueColor: const AlwaysStoppedAnimation(Colors.white),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            _GlassButton(
+              isPrimary: true,
+              onPressed: _busy ? null : _pickPdf,
+              child: const Row(
+                children: [
+                  Icon(Icons.upload_file, color: Colors.white),
+                  SizedBox(width: 8),
+                  Text('PDF Seç',
+                      style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            _GlassButton(
+              isPrimary: true,
+              onPressed: (_busy || _pdfBytes == null) ? null : _runOcr,
+              child: const Row(
+                children: [
+                  Icon(Icons.text_snippet_outlined, color: Colors.white),
+                  SizedBox(width: 8),
+                  Text('OCR Başlat',
+                      style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSummarySection() {
+    return _GlassCard(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              _summaryText(),
+              style: const TextStyle(color: Colors.white),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                _GlassButton(
+                  isPrimary: true,
+                  onPressed: _speakSummary,
+                  child: const Row(
+                    children: [
+                      Icon(Icons.volume_up_outlined, color: Colors.white),
+                      SizedBox(width: 8),
+                      Text('Özet Oku',
+                          style: TextStyle(
+                              color: Colors.white, fontWeight: FontWeight.bold)),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                _GlassButton(
+                  onPressed: _speakDetails,
+                  child: const Text('Detayları Oku',
+                      style: TextStyle(color: Colors.white)),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTestListSection() {
+    return _GlassCard(
+      child: Container(
+        padding: const EdgeInsets.all(8),
+        constraints: const BoxConstraints(minHeight: 140),
+        child: ListView.separated(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          itemCount: _tests.length,
+          separatorBuilder: (_, __) => Divider(
+            height: 8,
+            color: Colors.white.withOpacity(0.08),
+          ),
+          itemBuilder: (_, i) => _buildTestItem(_tests[i]),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTestItem(la.LabTest test) {
+    final value = _valueStr(test);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: 8,
+          height: 8,
+          margin: const EdgeInsets.only(top: 6),
+          decoration: BoxDecoration(
+            color: _flagColor(test.flag),
+            shape: BoxShape.circle,
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(test.name,
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold)),
+              const SizedBox(height: 4),
+              Wrap(
+                spacing: 12,
+                runSpacing: 4,
+                children: [
+                  Text(
+                    'Değer: ${value.isEmpty ? '—' : value} ${(test.unit ?? '')}'.trim(),
+                    style: TextStyle(
+                        color: Colors.white.withOpacity(0.9), fontSize: 12),
+                  ),
+                  Text(
+                    'Referans: ${_refStr(test)}',
+                    style: TextStyle(
+                        color: Colors.white.withOpacity(0.8), fontSize: 12),
+                  ),
+                  Text(
+                    'Durum: ${_flagLabel(test.flag)}',
+                    style: TextStyle(
+                        color: Colors.white.withOpacity(0.8), fontSize: 12),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildRawTextSection() {
+    return _GlassCard(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Ham OCR Metni',
+                style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            SelectableText(
+              _rawText.length > 6000
+                  ? _rawText.substring(0, 6000) + '…'
+                  : _rawText,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 11,
+                height: 1.25,
+                fontFamily: 'monospace',
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ---- UI helpers ----
+  Color _flagColor(la.LabFlag f) {
+    switch (f) {
+      case la.LabFlag.high:
+        return Colors.redAccent;
+      case la.LabFlag.low:
+        return Colors.orange;
+      case la.LabFlag.normal:
+        return Colors.greenAccent;
+      case la.LabFlag.positive:
+        return Colors.purpleAccent;
+      case la.LabFlag.borderline:
+        return Colors.pinkAccent;
+      case la.LabFlag.unknown:
+      default:
+        return Colors.grey;
+    }
+  }
+
+  String _flagLabel(la.LabFlag f) {
+    switch (f) {
+      case la.LabFlag.high:
+        return 'Yüksek';
+      case la.LabFlag.low:
+        return 'Düşük';
+      case la.LabFlag.normal:
+        return 'Normal';
+      case la.LabFlag.positive:
+        return 'Pozitif';
+      case la.LabFlag.borderline:
+        return 'Sınırda';
+      case la.LabFlag.unknown:
+      default:
+        return 'Bilinmiyor';
+    }
   }
 }
 
-// ========== e-NABIZ TABLO PARSERI ==========
-/// e-Nabız'dan indirilen PDF'lerin TABLO formatını özel olarak parse eder.
-/// "| Test Adı | Sonuç | Birim | Referans |" şeklindeki satırları arar.
-class EnabizTableParser {
-  static final RegExp _tableRowRegex = RegExp(
-    r'^\s*\|?\s*(.*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*(?:\|.*)?$',
-    multiLine: false,
-  );
+// ====== Glass UI parçaları ======
+class _GlassCard extends StatelessWidget {
+  final Widget child;
+  const _GlassCard({required this.child});
 
-  static LabReport parseTable(String rawText) {
-    final text = LabAnalyzer._norm(rawText);
-    final lines = text.split('\n').map((line) => line.trim()).where((line) => line.isNotEmpty);
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(20),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+        child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 6),
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.08),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: Colors.white.withOpacity(0.22), width: 1),
+            boxShadow: const [
+              BoxShadow(color: Colors.black26, blurRadius: 12, offset: Offset(0, 6)),
+            ],
+          ),
+          child: child,
+        ),
+      ),
+    );
+  }
+}
 
-    final foundTests = <LabTest>[];
+class _GlassButton extends StatelessWidget {
+  final Widget child;
+  final VoidCallback? onPressed;
+  final bool isPrimary;
 
-    for (final line in lines) {
-      // Satırın bir tablo satırı olup olmadığını kontrol et (| işaretleriyle ayrılmış mı)
-      final match = _tableRowRegex.firstMatch(line);
-      if (match == null) continue;
+  const _GlassButton({required this.child, this.onPressed, this.isPrimary = false});
 
-      final String testNameCell = match.group(1) ?? '';
-      final String resultCell = match.group(2) ?? '';
-      final String unitCell = match.group(3) ?? '';
-      final String referenceCell = match.group(4) ?? '';
-
-      // Hücrelerden gereksiz "|", "-", ve tekrarlayan boşlukları temizle
-      String cleanName = testNameCell.replaceAll(RegExp(r'^\s*[-|]\s*'), '').trim();
-      final cleanResult = resultCell.trim();
-      final cleanUnit = unitCell.trim();
-      String cleanReference = referenceCell.trim();
-
-      // Test adı boşsa veya "Tarih", "Tahlil" gibi başlık satırıysa atla
-      if (cleanName.isEmpty ||
-          cleanName == 'Tarih' ||
-          cleanName == 'Tahlil' ||
-          cleanName.contains('Referans Değeri') ||
-          cleanName.contains('Sonuç Birimi')) {
-        continue;
-      }
-
-      // Test adındaki gereksiz tekrarları temizle (örn: "Hemoglobin (Hb) Hemoglobin (Hb)" -> "Hemoglobin (Hb)")
-      cleanName = cleanName.replaceAllMapped(RegExp(r'(.+?)(?:\s+\1)+'), (match) => match.group(1) ?? '').trim();
-
-      // Değeri sayıya çevirmeye çalış (12.1, <0.01, Negatif 2)
-      double? numericValue;
-      String? op;
-      final numericMatch = RegExp(r'(?<op>[<>]?)\s*(?<val>\d+[.,]?\d*)').firstMatch(cleanResult);
-      if (numericMatch != null) {
-        op = numericMatch.namedGroup('op');
-        if (op != null && op.isEmpty) op = null;
-        final valStr = numericMatch.namedGroup('val')?.replaceAll(',', '.');
-        numericValue = double.tryParse(valStr ?? '');
-      }
-
-      // Referans aralığını parçala (örn: "12.3 - 15.3", "<0.3", "0 - 10 - Negatif ...")
-      String? refLow;
-      String? refHigh;
-      final rangeMatch = RegExp(r'([<>]?)\s*(\d+[.,]?\d*)\s*[-–]\s*([<>]?)\s*(\d+[.,]?\d*)').firstMatch(cleanReference);
-      final singleRefMatch = RegExp(r'([<>]?)\s*(\d+[.,]?\d*)').firstMatch(cleanReference);
-
-      if (rangeMatch != null) {
-        refLow = (rangeMatch.group(1)?.isNotEmpty ?? false) ? '${rangeMatch.group(1)}${rangeMatch.group(2)}' : rangeMatch.group(2);
-        refHigh = (rangeMatch.group(3)?.isNotEmpty ?? false) ? '${rangeMatch.group(3)}${rangeMatch.group(4)}' : rangeMatch.group(4);
-      } else if (singleRefMatch != null) {
-        // Tek sınırlı referans (örn: "<0.3")
-        final singleOp = singleRefMatch.group(1);
-        final singleVal = singleRefMatch.group(2);
-        if (singleOp == '<' || singleOp == '≤') {
-          refHigh = '$singleOp$singleVal';
-        } else if (singleOp == '>' || singleOp == '≥') {
-          refLow = '$singleOp$singleVal';
-        }
-      }
-
-      // Seroloji ve özel durumlar için flag belirle
-      LabFlag flag = LabFlag.unknown;
-      final lowerResult = cleanResult.toLowerCase();
-      final lowerRef = cleanReference.toLowerCase();
-
-      if (lowerResult.contains('negatif') || lowerRef.contains('negatif')) {
-        flag = LabFlag.normal;
-      } else if (lowerResult.contains('pozitif') || lowerRef.contains('pozitif')) {
-        flag = LabFlag.positive;
-      } else if (lowerResult.contains('borderline') || lowerRef.contains('borderline') || lowerRef.contains('şüpheli')) {
-        flag = LabFlag.borderline;
-      } else {
-        // Sayısal değerler için flag hesapla
-        flag = LabAnalyzer._flagForNumeric(
-          value: numericValue,
-          op: op,
-          low: LabAnalyzer._toDouble(refLow),
-          high: LabAnalyzer._toDouble(refHigh),
-        );
-      }
-
-      // Testi listeye ekle
-      foundTests.add(LabTest(
-        name: cleanName,
-        value: numericValue,
-        refLow: refLow,
-        refHigh: refHigh,
-        unit: cleanUnit.isNotEmpty ? cleanUnit : null,
-        op: op,
-        flag: flag,
-        raw: line,
-      ));
-    }
-
-    // Aynı isimdeki testleri birleştir (tabloda tekrarlanmış olabilir)
-    final uniqueTests = <String, LabTest>{};
-    for (final test in foundTests) {
-      final existing = uniqueTests[test.name];
-      if (existing == null || // İlk kez görülüyorsa ekle
-          (test.value != null && existing.value == null) || // Yeni değer daha iyiyse
-          (test.refLow != null && existing.refLow == null) || // Yeni referans daha iyiyse
-          (test.refHigh != null && existing.refHigh == null)) {
-        uniqueTests[test.name] = test;
-      }
-    }
-
-    return LabReport(uniqueTests.values.toList());
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(16),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+        child: Material(
+          color: (isPrimary ? Colors.white.withOpacity(0.22) : Colors.white.withOpacity(0.12)),
+          child: InkWell(
+            onTap: onPressed,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: isPrimary ? Colors.white.withOpacity(0.35) : Colors.white.withOpacity(0.25),
+                ),
+              ),
+              child: child,
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }

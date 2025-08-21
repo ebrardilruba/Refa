@@ -1,140 +1,14 @@
-// lib/enabiz_page.dart
-import 'dart:async' show unawaited;
+
 import 'dart:io';
 import 'dart:math' show min;
 import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:pdfx/pdfx.dart' as pdfx;
-import 'package:syncfusion_flutter_pdf/pdf.dart';
-
-import 'lab_analyzer.dart'; // LabAnalyzer, LabFlag, EnabizTableParser
-import 'settings.dart';
-import 'tts_service.dart';
-
-// ===================== ISOLATE FONKSİYONLARI =====================
-
-Future<String> _extractTextInIsolate(Uint8List bytes) async {
-  final doc = PdfDocument(inputBytes: bytes);
-  final extractor = PdfTextExtractor(doc);
-  final sb = StringBuffer();
-  for (var i = 0; i < doc.pages.count; i++) {
-    final chunk = extractor.extractText(startPageIndex: i, endPageIndex: i);
-    if (chunk.isNotEmpty) sb.writeln(chunk);
-  }
-  doc.dispose();
-  return _normalize(sb.toString());
-}
-
-Future<String> _enhancedOcr(Uint8List bytes, {int pages = 3}) async {
-  final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
-  final sb = StringBuffer();
-  pdfx.PdfDocument? doc;
-
-  try {
-    doc = await pdfx.PdfDocument.openData(bytes);
-    final pageCount = min(pages, doc.pagesCount);
-
-    for (var i = 1; i <= pageCount; i++) {
-      final page = await doc.getPage(i);
-      try {
-        final img = await page.render(
-          width: page.width.toDouble(),
-          height: page.height.toDouble(),
-          format: pdfx.PdfPageImageFormat.png,
-        );
-        if (img != null) {
-          final tmp = await File('${Directory.systemTemp.path}/enhanced_ocr_$i.png').create();
-          await tmp.writeAsBytes(img.bytes, flush: true);
-          final input = InputImage.fromFilePath(tmp.path);
-          final result = await recognizer.processImage(input);
-          if (result.text.isNotEmpty) {
-            sb.writeln('=== PAGE $i ===');
-            sb.writeln(result.text);
-            sb.writeln();
-          }
-          unawaited(tmp.delete());
-        }
-      } finally {
-        await page.close();
-      }
-    }
-  } catch (e, st) {
-    debugPrint('enhanced OCR error: $e\n$st');
-  } finally {
-    await recognizer.close();
-    await doc?.close();
-  }
-  return _normalize(sb.toString());
-}
-
-Future<List<Map<String, dynamic>>> _parseInIsolate(String text) async {
-  final report = LabAnalyzer.parse(text);
-  return report.tests.map(_mapTest).toList();
-}
-
-Future<List<Map<String, dynamic>>> _parseTableInIsolate(String text) async {
-  final report = EnabizTableParser.parseTable(text);
-  return report.tests.map(_mapTest).toList();
-}
-
-Map<String, dynamic> _mapTest(LabTest t) {
-  String flag;
-  switch (t.flag) {
-    case LabFlag.high:
-      flag = 'high';
-      break;
-    case LabFlag.low:
-      flag = 'low';
-      break;
-    case LabFlag.normal:
-      flag = 'normal';
-      break;
-    case LabFlag.positive:
-      flag = 'positive';
-      break;
-    case LabFlag.borderline:
-      flag = 'borderline';
-      break;
-    default:
-      flag = 'unknown';
-  }
-  return {
-    'name': t.name,
-    'value': t.value,
-    'unit': t.unit,
-    'refLow': t.refLow,
-    'refHigh': t.refHigh,
-    'flag': flag,
-  };
-}
-
-String _normalize(String raw) {
-  var s = raw
-      .replaceAll('\u00A0', ' ')
-      .replaceAll('\u2212', '-')
-      .replaceAll('–', '-')
-      .replaceAll('—', '-')
-      .replaceAll('·', ' ')
-      .replaceAll('\r', ' ')
-      .replaceAll('\t', ' ')
-      .replaceAll(RegExp('[ ]{2,}'), ' ')
-      .trim();
-
-  s = s.replaceAll('µ', 'u');
-  s = s.replaceAllMapped(RegExp(r'(\d),(\d)'), (m) => '${m[1]}.${m[2]}');
-  s = s.replaceAll(RegExp(r'mg\s*[/\-]\s*dL', caseSensitive: false), 'mg/dL');
-  s = s.replaceAll(RegExp(r'ug\s*/\s*L', caseSensitive: false), 'ug/L');
-  s = s.replaceAll(RegExp(r'uIU\s*/\s*mL', caseSensitive: false), 'uIU/mL');
-  s = s.replaceAll(RegExp(r'\s*-\s*'), ' - ');
-  return s;
-}
-
-// ======================== WIDGET ========================
 
 class EnabizPage extends StatefulWidget {
   const EnabizPage({super.key});
@@ -144,33 +18,50 @@ class EnabizPage extends StatefulWidget {
 }
 
 class _EnabizPageState extends State<EnabizPage> {
+  // ---- TTS hızları ----
+  static const double _rateGeneral = 0.85; // genel
+  static const double _rateSummary = 0.80; // özet
+  static const double _rateDetails = 0.72; // bulgular (daha yavaş)
+
+  // ---- State ----
   String? _fileName;
-  int? _pageCount;
   Uint8List? _pdfBytes;
-  bool _analyzing = false;
+  bool _busy = false;
+  double _progress = 0;
+  String _rawText = '';
+  List<LabItem> _items = [];
 
-  bool _looksLikePdf(Uint8List b) {
-    if (b.length < 4) return false;
-    return b[0] == 0x25 && b[1] == 0x50 && b[2] == 0x44 && b[3] == 0x46; // %PDF
+  // ---- TTS ----
+  final _tts = FlutterTts();
+  bool _speaking = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initTts();
   }
 
-  Future<bool> _validatePdfStructure(Uint8List bytes) async {
-    try {
-      final head = String.fromCharCodes(bytes.sublist(0, min(1000, bytes.length)));
-      final hasEnabizKeywords = head.contains(
-        RegExp(r'(e.?nab[ıi]z|tahlil|laboratuvar|sonuç|rapor)', caseSensitive: false),
-      );
-      return hasEnabizKeywords;
-    } catch (_) {
-      return false;
-    }
+  Future<void> _initTts() async {
+    await _tts.setLanguage("tr-TR");
+    await _tts.setSpeechRate(_rateGeneral);
+    await _tts.setPitch(1.0);
+    await _tts.awaitSpeakCompletion(true);
+    _tts.setStartHandler(() => setState(() => _speaking = true));
+    _tts.setCompletionHandler(() => setState(() => _speaking = false));
+    _tts.setCancelHandler(() => setState(() => _speaking = false));
   }
 
+  Future<void> _stopTts() async {
+    await _tts.stop();
+    if (mounted) setState(() => _speaking = false);
+  }
+
+  // ---- File pick ----
   Future<void> _pickPdf() async {
     try {
       final res = await FilePicker.platform.pickFiles(
         type: FileType.custom,
-        allowedExtensions: ['pdf'],
+        allowedExtensions: const ['pdf'],
         withData: true,
       );
       if (res == null || res.files.isEmpty) return;
@@ -181,205 +72,362 @@ class _EnabizPageState extends State<EnabizPage> {
         bytes = await File(f.path!).readAsBytes();
       }
       if (bytes == null) {
-        _showSnackBar('Dosya okunamadı.', isError: true);
+        _snack('Dosya okunamadı.', err: true);
         return;
-      }
-
-      if (!_looksLikePdf(bytes)) {
-        _showSnackBar('Seçilen dosya PDF değil (%PDF imzası yok).', isError: true);
-        return;
-      }
-
-      // Şifre/sayfa kontrolü
-      int pages = 0;
-      try {
-        final tmpDoc = PdfDocument(inputBytes: bytes);
-        pages = tmpDoc.pages.count;
-        tmpDoc.dispose();
-      } catch (e) {
-        final msg = e.toString().toLowerCase();
-        if (msg.contains('encrypt') || msg.contains('password')) {
-          _showSnackBar("Şifreli PDF. e-Nabız'dan şifresiz export al.", isError: true);
-          return;
-        }
-        rethrow;
-      }
-
-      final looksLikeEnabiz = await _validatePdfStructure(bytes);
-      if (!looksLikeEnabiz) {
-        _showSnackBar(
-          'Uyarı: e-Nabız anahtar kelimeleri bulunamadı, yine de deneyeceğim.',
-        );
       }
 
       setState(() {
         _fileName = f.name;
-        _pageCount = pages;
         _pdfBytes = bytes;
+        _rawText = '';
+        _items = [];
+        _progress = 0;
       });
 
-      if (mounted) _showSnackBar('PDF yüklendi: ${f.name} ($pages sayfa)');
-    } catch (e, st) {
-      debugPrint('Pick PDF error: $e\n$st');
-      if (!mounted) return;
-      _showSnackBar('PDF yüklenemedi: $e', isError: true);
+      _snack('PDF seçildi: ${f.name}');
+    } catch (e) {
+      _snack('PDF seçilemedi: $e', err: true);
     }
   }
 
-  void _showSnackBar(String message, {bool isError = false}) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message, style: const TextStyle(color: Colors.white)),
-        backgroundColor: isError ? Colors.red.shade600 : Colors.green.shade600,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        margin: const EdgeInsets.all(16),
-      ),
-    );
-  }
-
-  // ---------------------- ANALİZ AKIŞI ----------------------
-  Future<void> _analyzeAndSpeak() async {
+  // ---- OCR ----
+  Future<void> _runOcr() async {
     if (_pdfBytes == null) return;
-    setState(() => _analyzing = true);
+
+    setState(() {
+      _busy = true;
+      _rawText = '';
+      _items = [];
+      _progress = 0;
+    });
+
+    final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
+    pdfx.PdfDocument? doc;
 
     try {
-      unawaited(VoiceService.instance.speak('Analiz başlatıldı.'));
+      doc = await pdfx.PdfDocument.openData(_pdfBytes!);
+      final pageCount = min(3, doc.pagesCount); // ilk 3 sayfa genelde yetiyor
+      final buf = StringBuffer();
 
-      String text = '';
-      try {
-        text = await compute(_extractTextInIsolate, _pdfBytes!);
-      } catch (e, st) {
-        debugPrint('Syncfusion extract error: $e\n$st');
-      }
+      for (var i = 1; i <= pageCount; i++) {
+        final page = await doc.getPage(i);
+        try {
+          final img = await page.render(
+            width: page.width * 1.9,   // double; toInt YOK
+            height: page.height * 1.9, // double; toInt YOK
+            format: pdfx.PdfPageImageFormat.png,
+          );
 
-      List<Map<String, dynamic>> parsed = [];
-      if (text.isNotEmpty) {
-        parsed = await compute(_parseTableInIsolate, text);
-      }
+          if (img != null) {
+            final tmp = await File('${Directory.systemTemp.path}/enabiz_ocr_$i.png').create();
+            await tmp.writeAsBytes(img.bytes, flush: true);
 
-      if (parsed.isEmpty) {
-        final ocrText = await _enhancedOcr(_pdfBytes!, pages: 3);
-        if (ocrText.isNotEmpty) {
-          parsed = await compute(_parseTableInIsolate, ocrText);
-          if (text.isEmpty) text = ocrText;
+            final input = InputImage.fromFilePath(tmp.path);
+            final result = await recognizer.processImage(input);
+
+            if (result.text.isNotEmpty) {
+              buf.writeln('=== SAYFA $i ===');
+              buf.writeln(result.text);
+              buf.writeln();
+            }
+          }
+        } finally {
+          await page.close();
+          if (mounted) setState(() => _progress = i / pageCount);
         }
       }
 
-      if (parsed.isEmpty && text.isNotEmpty) {
-        parsed = await compute(_parseInIsolate, text);
+      final raw = _normalize(buf.toString());
+      final parsed = _parseLabs(raw);
+
+      setState(() {
+        _rawText = raw;
+        _items = parsed;
+      });
+
+      if (_items.isEmpty) {
+        _snack('OCR tamam ama test/parsing zayıf. PDF düzeni tablo değil veya kalite düşük olabilir.',
+            err: true);
+      } else {
+        _snack('OCR + analiz tamam: ${_items.length} öğe.');
       }
-
-      if (parsed.isEmpty) {
-        await VoiceService.instance.speak(
-          "Bu PDF'den test sonuçları çıkaramadım. "
-          "Lütfen e-Nabız'dan şifresiz ve orijinal PDF formatında indirdiğinizden emin olun.",
-        );
-        if (!mounted) return;
-        _showSnackBar('0 test bulundu. PDF şablonu farklı olabilir.', isError: true);
-        return;
-      }
-
-      final counts = _counts(parsed);
-      final summary = _summarySentence(counts, parsed);
-
-      await VoiceService.instance.speak('Özet: $summary');
-      if (!mounted) return;
-
-      final wantDetails = await _showAnalysisDialog(summary, parsed);
-      if (wantDetails == true) {
-        final details = _buildDetailsNarration(parsed);
-        await VoiceService.instance.speak(details);
-      }
-
-      if (mounted) _showSnackBar('Analiz tamamlandı.');
-    } catch (e, st) {
-      debugPrint('Analyze error: $e\n$st');
-      await VoiceService.instance.speak('Analiz sırasında bir hata oluştu.');
-      if (!mounted) return;
-      _showSnackBar('Analiz hatası: $e', isError: true);
+    } catch (e) {
+      _snack('OCR hata: $e', err: true);
     } finally {
-      if (mounted) setState(() => _analyzing = false);
+      await recognizer.close();
+      await doc?.close();
+      if (mounted) setState(() => _busy = false);
     }
   }
 
-  Future<bool?> _showAnalysisDialog(String summary, List<Map<String, dynamic>> parsed) {
-    return showDialog<bool>(
-      context: context,
-      builder: (ctx) => Dialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-        child: Container(
-          constraints: const BoxConstraints(maxWidth: 500, maxHeight: 600),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(24),
-            gradient: const LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [Color(0xFF334155), Color(0xFF1E3A8A)],
-            ),
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(24),
-            child: BackdropFilter(
-              filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-              child: Container(
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(24),
-                  border: Border.all(color: Colors.white.withOpacity(0.2)),
-                ),
-                padding: const EdgeInsets.all(24),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Text(
-                      'Analiz Sonucu',
-                      style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 16),
-                    Flexible(
-                      child: SingleChildScrollView(
-                        child: _AnalysisPreview(summary: summary, parsed: parsed),
-                      ),
-                    ),
-                    const SizedBox(height: 24),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                      children: [
-                        _GlassButton(
-                          onPressed: () => Navigator.pop(ctx, false),
-                          child: const Text('Hayır', style: TextStyle(color: Colors.white)),
-                        ),
-                        _GlassButton(
-                          onPressed: () => Navigator.pop(ctx, true),
-                          isPrimary: true,
-                          child: const Text('Evet, Detayları Oku',
-                              style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ),
+  // ---- Parsing ----
+  List<LabItem> _parseLabs(String text) {
+    final lines = text
+        .split('\n')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+
+    final items = <LabItem>[];
+
+    // Yaygın test adları
+    final testNameRegexes = <RegExp>[
+      RegExp(r'^(TSH)\b', caseSensitive: false),
+      RegExp(r'^(Serbest\s*T4|Free\s*T4|FT4)\b', caseSensitive: false),
+      RegExp(r'^(Serbest\s*T3|Free\s*T3|FT3)\b', caseSensitive: false),
+      RegExp(r'^(Anti.*TPO|Tiro(peroksidaz|id) ?(antikor|ab)|TPO\s*Ab)\b', caseSensitive: false),
+      RegExp(r'^(Anti.*T(g|iroglobulin)|Tg\s*Ab|Anti\s*Tg)\b', caseSensitive: false),
+      // Fallback: alfabetik satırlar (başlık gibi)
+      RegExp(r'^[A-Za-zĞÜŞİÖÇğüşiöç\(\)\/\.\-\s]{3,}$'),
+    ];
+
+    // Değer (tek sayı ya da < / > ile) + opsiyonel birim
+    final valueRe = RegExp(
+        r'^(?<sign>[<>≤≥]?)\s*(?<val>\d+(?:[.,]\d+)?)\s*(?<unit>[A-Za-zµμ%\/\^\-\*\·]+)?$');
+
+    // Referans aralığı (etiketli)
+    final refTags =
+        RegExp(r'(ref|referans|aralık|normal|range)', caseSensitive: false);
+    final rangeRe = RegExp(
+        r'(?<lo>\d+(?:[.,]\d+)?)\s*[-–—]\s*(?<hi>\d+(?:[.,]\d+)?)\s*(?<unit>[A-Za-zµμ%\/\^\-\*\·]+)?');
+
+    LabItem? cur;
+
+    String? pickUnit(String? a, String? b) {
+      String norm(String s) => s.replaceAll(RegExp(r'[^A-Za-zµμ%\/]'), '');
+      if ((a ?? '').isEmpty) return b;
+      if ((b ?? '').isEmpty) return a;
+      return norm(a!) == norm(b!) ? a : a; // çakışırsa ilkini koru
+    }
+
+    for (var i = 0; i < lines.length; i++) {
+      final ln = lines[i];
+
+      // 1) Test adı mı?
+      final isName = testNameRegexes.any((re) => re.hasMatch(ln));
+      if (isName) {
+        if (cur != null) items.add(cur);
+        cur = LabItem(name: ln);
+        continue;
+      }
+
+      if (cur == null) continue;
+
+      // 2) Etiketli referans satırı
+      if (refTags.hasMatch(ln)) {
+        final m = rangeRe.firstMatch(ln);
+        if (m != null) {
+          cur.refLow = _num(m.namedGroup('lo'));
+          cur.refHigh = _num(m.namedGroup('hi'));
+          cur.unit = pickUnit(cur.unit, m.namedGroup('unit'));
+        }
+        continue;
+      }
+
+      // 3) Etiketsiz "lo–hi" aralığı
+      final rm = rangeRe.firstMatch(ln);
+      if (rm != null && (cur.refLow == null || cur.refHigh == null)) {
+        cur.refLow = _num(rm.namedGroup('lo'));
+        cur.refHigh = _num(rm.namedGroup('hi'));
+        cur.unit = pickUnit(cur.unit, rm.namedGroup('unit'));
+        continue;
+      }
+
+      // 4) Tek değer (örn 7.84, <0.008)
+      final vm = valueRe.firstMatch(ln);
+      if (vm != null) {
+        final sign = (vm.namedGroup('sign') ?? '').trim();
+        final v = _num(vm.namedGroup('val'));
+        cur.value = v;
+        cur.valueStr = (sign.isNotEmpty ? '$sign ' : '') + (v?.toString() ?? '');
+        cur.unit = pickUnit(cur.unit, vm.namedGroup('unit'));
+        continue;
+      }
+
+      // 5) "Sonuç" ipucu → bir sonraki satır değer olabilir
+      if (ln.toLowerCase().contains('sonuç') && i + 1 < lines.length) {
+        final next = lines[i + 1];
+        final nm = valueRe.firstMatch(next);
+        if (nm != null) {
+          final sign = (nm.namedGroup('sign') ?? '').trim();
+          final v = _num(nm.namedGroup('val'));
+          cur.value = v;
+          cur.valueStr = (sign.isNotEmpty ? '$sign ' : '') + (v?.toString() ?? '');
+          cur.unit = pickUnit(cur.unit, nm.namedGroup('unit'));
+        }
+        i++;
+        continue;
+      }
+    }
+
+    if (cur != null) items.add(cur);
+
+    // Flag hesapla
+    for (final it in items) {
+      it.flag = _flag(it);
+    }
+
+    return items
+        .where((e) => e.name.trim().length >= 3 && (e.value != null || e.valueStr != null))
+        .toList();
+  }
+
+  static double? _num(String? s) {
+    if (s == null) return null;
+    final t = s.replaceAll(',', '.');
+    return double.tryParse(t);
+  }
+
+  static String _normalize(String raw) {
+    var s = raw
+        .replaceAll('\u00A0', ' ')
+        .replaceAll('\u2212', '-')
+        .replaceAll('–', '-')
+        .replaceAll('—', '-')
+        .replaceAll('·', ' ')
+        .replaceAll('•', ' ')
+        .replaceAll('\r', ' ')
+        .replaceAll('\t', ' ')
+        .replaceAll(RegExp('[ ]{2,}'), ' ')
+        .trim();
+
+    s = s
+        .replaceAll('µ', 'u')
+        .replaceAll('μ', 'u')
+        .replaceAll('ı', 'i')
+        .replaceAll('İ', 'I')
+        .replaceAll('ş', 's')
+        .replaceAll('Ş', 'S')
+        .replaceAll('ğ', 'g')
+        .replaceAll('Ğ', 'G')
+        .replaceAll('ç', 'c')
+        .replaceAll('Ç', 'C')
+        .replaceAll('ö', 'o')
+        .replaceAll('Ö', 'O')
+        .replaceAll('ü', 'u')
+        .replaceAll('Ü', 'U');
+
+    // 12,34 -> 12.34
+    s = s.replaceAllMapped(RegExp(r'(\d),(\d)'), (m) => '${m[1]}.${m[2]}');
+    return s;
+  }
+
+  static LabFlag _flag(LabItem it) {
+    if (it.refLow == null || it.refHigh == null || it.value == null) {
+      return LabFlag.unknown;
+    }
+    if (it.value! < it.refLow!) return LabFlag.low;
+    if (it.value! > it.refHigh!) return LabFlag.high;
+    return LabFlag.normal;
+  }
+
+  // ---- TTS metinleri ----
+  String _summaryText(List<LabItem> list) {
+    if (list.isEmpty) return 'Herhangi bir test okunamadı.';
+
+    final highs = list.where((e) => e.flag == LabFlag.high).toList();
+    final lows = list.where((e) => e.flag == LabFlag.low).toList();
+    final normals = list.where((e) => e.flag == LabFlag.normal).toList();
+    final outOfRef = [...highs, ...lows];
+
+    final buf = StringBuffer();
+    buf.write('Toplam ${list.length} test var. ');
+    buf.write('${highs.length} yüksek, ${lows.length} düşük, ${normals.length} normal. ');
+
+    if (outOfRef.isNotEmpty) {
+      buf.write('Referans dışı ${outOfRef.length} sonuç: ');
+      final maxList = outOfRef.take(5).map((e) {
+        final v = e.valueStr ?? (e.value?.toString() ?? '?');
+        final unit = (e.unit != null && e.unit!.isNotEmpty) ? ' ${e.unit}' : '';
+        final ref = (e.refLow != null && e.refHigh != null)
+            ? ' (referans ${_fmt(e.refLow)} - ${_fmt(e.refHigh)}$unit)'
+            : '';
+        return '${e.name}: $v$unit$ref';
+      }).join(', ');
+      buf.write(maxList);
+      if (outOfRef.length > 5) {
+        buf.write(', ve ${outOfRef.length - 5} sonuç daha.');
+      }
+    }
+
+    return buf.toString().trim();
+  }
+
+  String _detailsText(List<LabItem> list) {
+    if (list.isEmpty) return 'Detay yok.';
+
+    String line(LabItem e) {
+      final v = e.valueStr ?? (e.value?.toString() ?? '?');
+      final unit = (e.unit != null && e.unit!.isNotEmpty) ? ' ${e.unit}' : '';
+      final ref = (e.refLow != null && e.refHigh != null)
+          ? ' Referans: ${_fmt(e.refLow)} - ${_fmt(e.refHigh)}$unit.'
+          : '';
+      return '${e.name}: $v$unit. Durum: ${_flagLabel(e.flag)}.$ref';
+    }
+
+    final buf = StringBuffer();
+
+    final highs = list.where((e) => e.flag == LabFlag.high).toList();
+    final lows  = list.where((e) => e.flag == LabFlag.low).toList();
+    final norms = list.where((e) => e.flag == LabFlag.normal).toList();
+
+    if (highs.isNotEmpty) {
+      buf.writeln('Yüksek olanlar:');
+      for (final e in highs) buf.writeln(line(e));
+      buf.writeln();
+    }
+    if (lows.isNotEmpty) {
+      buf.writeln('Düşük olanlar:');
+      for (final e in lows) buf.writeln(line(e));
+      buf.writeln();
+    }
+    if (norms.isNotEmpty) {
+      buf.writeln('Normal olanlardan örnekler:');
+      for (final e in norms.take(5)) buf.writeln(line(e));
+    }
+
+    return buf.toString().trim();
+  }
+
+  static String _fmt(num? v) {
+    if (v == null) return '';
+    return (v % 1 == 0) ? v.toStringAsFixed(0) : v.toStringAsFixed(2);
+  }
+
+  Future<void> _speakSummary() async {
+    if (_items.isEmpty) return;
+    await _tts.setSpeechRate(_rateSummary);
+    await _tts.speak(_summaryText(_items));
+  }
+
+  Future<void> _speakDetails() async {
+    if (_items.isEmpty) return;
+    await _tts.setSpeechRate(_rateDetails);
+    await _tts.speak(_detailsText(_items));
+  }
+
+  void _snack(String msg, {bool err = false}) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        backgroundColor: err ? Colors.red.shade600 : Colors.green.shade700,
       ),
     );
   }
 
   @override
   void dispose() {
-    VoiceService.instance.stopSpeaking();
+    _stopTts();
     super.dispose();
   }
 
+  // ---- UI ----
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: Stack(
         children: [
-          // Background
+          // Gradient arka plan
           Container(
             decoration: const BoxDecoration(
               gradient: LinearGradient(
@@ -393,193 +441,250 @@ class _EnabizPageState extends State<EnabizPage> {
           SafeArea(
             child: Column(
               children: [
-                // AppBar
+                // Üst bar
                 Padding(
-                  padding: const EdgeInsets.all(24),
+                  padding: const EdgeInsets.all(16),
                   child: Row(
                     children: [
                       _GlassButton(
-                        onPressed: () => Navigator.pop(context),
+                        onPressed: () {
+                          _stopTts();
+                          Navigator.of(context).maybePop();
+                        },
                         child: const Icon(Icons.arrow_back, color: Colors.white),
                       ),
-                      const SizedBox(width: 16),
+                      const SizedBox(width: 12),
                       const Expanded(
-                        child: Text('Tahliller (PDF)',
-                            style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold)),
+                        child: Text(
+                          'Tahliller (PDF → OCR)',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
                       ),
                       _GlassButton(
-                        onPressed: () => VoiceService.instance.stopSpeaking(),
+                        onPressed: _speaking ? _stopTts : null,
                         child: const Icon(Icons.stop_circle_outlined, color: Colors.white),
-                      ),
-                      const SizedBox(width: 8),
-                      _GlassButton(
-                        onPressed: () {
-                          Navigator.of(context).push(MaterialPageRoute(builder: (_) => const SettingsPage()));
-                        },
-                        child: const Icon(Icons.settings, color: Colors.white),
                       ),
                     ],
                   ),
                 ),
 
-                // Content
+                // İçerik
                 Expanded(
                   child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 24),
-                    child: Center(
-                      child: SingleChildScrollView(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            // Icon
-                            Container(
-                              width: 120,
-                              height: 120,
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFF59E0B),
-                                borderRadius: BorderRadius.circular(32),
-                                boxShadow: const [
-                                  BoxShadow(color: Colors.black26, blurRadius: 20, offset: Offset(0, 8)),
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: SingleChildScrollView(
+                      child: Column(
+                        children: [
+                          // Dosya seç + OCR başlat
+                          _GlassCard(
+                            child: Padding(
+                              padding: const EdgeInsets.all(16),
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          _fileName ?? 'PDF seçilmedi',
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                        if (_busy) ...[
+                                          const SizedBox(height: 8),
+                                          LinearProgressIndicator(
+                                            backgroundColor: Colors.white24,
+                                            value: _progress == 0 ? null : _progress,
+                                            valueColor: const AlwaysStoppedAnimation(Colors.white),
+                                          ),
+                                        ],
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  _GlassButton(
+                                    isPrimary: true,
+                                    onPressed: _busy ? null : _pickPdf,
+                                    child: Row(
+                                      children: const [
+                                        Icon(Icons.upload_file, color: Colors.white),
+                                        SizedBox(width: 8),
+                                        Text('PDF Seç',
+                                            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  _GlassButton(
+                                    isPrimary: true,
+                                    onPressed: (_busy || _pdfBytes == null) ? null : _runOcr,
+                                    child: Row(
+                                      children: const [
+                                        Icon(Icons.text_snippet_outlined, color: Colors.white),
+                                        SizedBox(width: 8),
+                                        Text('OCR Başlat',
+                                            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                                      ],
+                                    ),
+                                  ),
                                 ],
                               ),
-                              child: const Icon(Icons.picture_as_pdf_rounded, size: 64, color: Colors.white),
                             ),
+                          ),
 
-                            const SizedBox(height: 24),
+                          const SizedBox(height: 16),
 
-                            const Text(
-                              "e-Nabız PDF'ini yükle",
-                              textAlign: TextAlign.center,
-                              style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold),
-                            ),
-
-                            const SizedBox(height: 8),
-
-                            Text(
-                              'Önce özet çıkarır, onaylarsan detayları sesli anlatırım.',
-                              textAlign: TextAlign.center,
-                              style:
-                                  TextStyle(color: Colors.white.withOpacity(0.8), fontSize: 16, height: 1.4),
-                            ),
-
-                            const SizedBox(height: 32),
-
-                            _GlassButton(
-                              onPressed: _pickPdf,
-                              isPrimary: true,
-                              child: const Padding(
-                                padding: EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
+                          // Özet + TTS
+                          if (_items.isNotEmpty)
+                            _GlassCard(
+                              child: Padding(
+                                padding: const EdgeInsets.all(16),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    Icon(Icons.upload_file, color: Colors.white),
-                                    SizedBox(width: 12),
-                                    Text('PDF Ekle',
-                                        style: TextStyle(
-                                            color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+                                    Text(
+                                      _summaryText(_items),
+                                      style: const TextStyle(color: Colors.white),
+                                    ),
+                                    const SizedBox(height: 12),
+                                    Row(
+                                      children: [
+                                        _GlassButton(
+                                          isPrimary: true,
+                                          onPressed: _speakSummary,
+                                          child: Row(
+                                            children: const [
+                                              Icon(Icons.volume_up_outlined, color: Colors.white),
+                                              SizedBox(width: 8),
+                                              Text('Özet Oku',
+                                                  style: TextStyle(
+                                                      color: Colors.white, fontWeight: FontWeight.bold)),
+                                            ],
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        _GlassButton(
+                                          onPressed: _speakDetails,
+                                          child: const Text('Detayları Oku',
+                                              style: TextStyle(color: Colors.white)),
+                                        ),
+                                      ],
+                                    ),
                                   ],
                                 ),
                               ),
                             ),
 
-                            const SizedBox(height: 24),
+                          const SizedBox(height: 12),
 
-                            // -------- DOSYA KARTI --------
-                            if (_fileName != null)
-                              _GlassCard(
-                                child: Padding(
-                                  padding: const EdgeInsets.all(20),
-                                  child: Column(
-                                    children: [
-                                      Row(
-                                        children: [
-                                          Container(
-                                            width: 48,
-                                            height: 48,
-                                            decoration: BoxDecoration(
-                                              color: const Color(0xFFF59E0B),
-                                              borderRadius: BorderRadius.circular(12),
-                                            ),
-                                            child:
-                                                const Icon(Icons.description, color: Colors.white, size: 24),
+                          // Test listesi
+                          if (_items.isNotEmpty)
+                            _GlassCard(
+                              child: Container(
+                                padding: const EdgeInsets.all(8),
+                                constraints: const BoxConstraints(minHeight: 140),
+                                child: ListView.separated(
+                                  shrinkWrap: true,
+                                  physics: const NeverScrollableScrollPhysics(),
+                                  itemCount: _items.length,
+                                  separatorBuilder: (_, __) => Divider(
+                                    height: 8,
+                                    color: Colors.white.withOpacity(0.08),
+                                  ),
+                                  itemBuilder: (_, i) {
+                                    final it = _items[i];
+                                    return Row(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Container(
+                                          width: 8,
+                                          height: 8,
+                                          margin: const EdgeInsets.only(top: 6),
+                                          decoration: BoxDecoration(
+                                            color: _flagColor(it.flag),
+                                            shape: BoxShape.circle,
                                           ),
-                                          const SizedBox(width: 16),
-                                          Expanded(
-                                            child: Column(
-                                              crossAxisAlignment: CrossAxisAlignment.start,
-                                              children: [
-                                                Text(_fileName!,
-                                                    style: const TextStyle(
-                                                        color: Colors.white,
-                                                        fontSize: 16,
-                                                        fontWeight: FontWeight.bold)),
-                                                const SizedBox(height: 4),
-                                                Text('${_pageCount ?? 0} sayfa',
-                                                    style: TextStyle(
-                                                        color: Colors.white.withOpacity(0.7), fontSize: 14)),
-                                              ],
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                      const SizedBox(height: 20),
-                                      SizedBox(
-                                        width: double.infinity,
-                                        child: _GlassButton(
-                                          onPressed: _analyzing ? null : _analyzeAndSpeak,
-                                          isPrimary: true,
-                                          child: _analyzing
-                                              ? const Padding(
-                                                  padding: EdgeInsets.all(16),
-                                                  child: SizedBox(
-                                                    height: 20,
-                                                    width: 20,
-                                                    child: CircularProgressIndicator(
-                                                      strokeWidth: 2,
-                                                      valueColor:
-                                                          AlwaysStoppedAnimation<Color>(Colors.white),
-                                                    ),
-                                                  ),
-                                                )
-                                              : const Padding(
-                                                  padding: EdgeInsets.all(16),
-                                                  child: Text('Analiz Et ve Oku',
-                                                      style: TextStyle(
-                                                          color: Colors.white,
-                                                          fontSize: 16,
-                                                          fontWeight: FontWeight.bold)),
-                                                ),
                                         ),
-                                      ),
-                                    ],
-                                  ),
+                                        const SizedBox(width: 10),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              Text(it.name,
+                                                  style: const TextStyle(
+                                                      color: Colors.white,
+                                                      fontWeight: FontWeight.bold)),
+                                              const SizedBox(height: 4),
+                                              Wrap(
+                                                spacing: 12,
+                                                runSpacing: 4,
+                                                children: [
+                                                  Text(
+                                                    'Değer: ${it.valueStr ?? (it.value?.toString() ?? '?')} ${it.unit ?? ''}'.trim(),
+                                                    style: TextStyle(
+                                                        color: Colors.white.withOpacity(0.9), fontSize: 12),
+                                                  ),
+                                                  Text(
+                                                    'Referans: ${it.refLow != null && it.refHigh != null ? '${_fmt(it.refLow)}–${_fmt(it.refHigh)} ${it.unit ?? ''}' : '—'}',
+                                                    style: TextStyle(
+                                                        color: Colors.white.withOpacity(0.8), fontSize: 12),
+                                                  ),
+                                                  Text(
+                                                    'Durum: ${_flagLabel(it.flag)}',
+                                                    style: TextStyle(
+                                                        color: Colors.white.withOpacity(0.8), fontSize: 12),
+                                                  ),
+                                                ],
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ],
+                                    );
+                                  },
                                 ),
                               ),
+                            ),
 
-                            const SizedBox(height: 24),
+                          const SizedBox(height: 12),
 
-                            // -------- SADECE ALTTAKİ İLERLEME --------
-                            if (_analyzing)
-                              _GlassCard(
-                                child: const Padding(
-                                  padding: EdgeInsets.all(20),
-                                  child: Column(
-                                    children: [
-                                      LinearProgressIndicator(
-                                        backgroundColor: Colors.white24,
-                                        valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                          // Ham metin (debug)
+                          if (_rawText.isNotEmpty)
+                            _GlassCard(
+                              child: Padding(
+                                padding: const EdgeInsets.all(12),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Text('Ham OCR Metni',
+                                        style: TextStyle(
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.bold)),
+                                    const SizedBox(height: 8),
+                                    SelectableText(
+                                      _rawText.length > 6000
+                                          ? _rawText.substring(0, 6000) + '…'
+                                          : _rawText,
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 11,
+                                        height: 1.25,
+                                        fontFamily: 'monospace',
                                       ),
-                                      SizedBox(height: 12),
-                                      Text('PDF analiz ediliyor...',
-                                          style: TextStyle(color: Colors.white, fontSize: 14)),
-                                    ],
-                                  ),
+                                    ),
+                                  ],
                                 ),
                               ),
+                            ),
 
-                            const SizedBox(height: 32),
-                          ],
-                        ),
+                          const SizedBox(height: 24),
+                        ],
                       ),
                     ),
                   ),
@@ -592,112 +697,62 @@ class _EnabizPageState extends State<EnabizPage> {
     );
   }
 
-  // ---- Yardımcılar ----
-
-  Map<String, int> _counts(List<Map<String, dynamic>> parsed) {
-    final highs = parsed.where((m) => m['flag'] == 'high').length;
-    final lows = parsed.where((m) => m['flag'] == 'low').length;
-    final pos = parsed.where((m) => m['flag'] == 'positive').length;
-    final border = parsed.where((m) => m['flag'] == 'borderline').length;
-    final total = parsed.length;
-    return {'highs': highs, 'lows': lows, 'pos': pos, 'border': border, 'total': total};
+  // ---- UI helpers ----
+  Color _flagColor(LabFlag f) {
+    switch (f) {
+      case LabFlag.high:
+        return Colors.redAccent;
+      case LabFlag.low:
+        return Colors.orange;
+      case LabFlag.normal:
+        return Colors.greenAccent;
+      default:
+        return Colors.grey;
+    }
   }
 
-  String _summarySentence(Map<String, int> c, List<Map<String, dynamic>> parsed) {
-    final abn = c['highs']! + c['lows']! + c['pos']! + c['border']!;
-    String summary = 'Toplam ${c['total']} test bulundu. '
-        'Referans dışı $abn sonuç var: ${c['highs']} yüksek, ${c['lows']} düşük'
-        '${c['pos']! > 0 ? ', ${c['pos']} pozitif' : ''}'
-        '${c['border']! > 0 ? ', ${c['border']} sınırda' : ''}.';
-
-    final topHigh = parsed
-        .where((m) => m['flag'] == 'high')
-        .take(2)
-        .map((m) => '${m['name']} ${_fmt(m['value'])} ${m['unit'] ?? ''}')
-        .toList();
-    final topLow = parsed
-        .where((m) => m['flag'] == 'low')
-        .take(2 - topHigh.length)
-        .map((m) => '${m['name']} ${_fmt(m['value'])} ${m['unit'] ?? ''}')
-        .toList();
-    final topPos = parsed
-        .where((m) => m['flag'] == 'positive')
-        .take(2 - (topHigh.length + topLow.length))
-        .map((m) => '${m['name']} pozitif')
-        .toList();
-
-    final top = [...topHigh, ...topLow, ...topPos].where((e) => e.trim().isNotEmpty).toList();
-    if (top.isNotEmpty) summary += ' Öne çıkanlar: ${top.join(', ')}.';
-    return summary;
+  String _flagLabel(LabFlag f) {
+    switch (f) {
+      case LabFlag.high:
+        return 'Yüksek';
+      case LabFlag.low:
+        return 'Düşük';
+      case LabFlag.normal:
+        return 'Normal';
+      case LabFlag.unknown:
+      default:
+        return 'Bilinmiyor';
+    }
   }
-
-  String _fmt(dynamic v) {
-    if (v == null) return '';
-    final d = (v is num) ? v.toDouble() : double.tryParse('$v');
-    if (d == null) return '$v';
-    return d % 1 == 0 ? d.toStringAsFixed(0) : d.toString();
-  }
-
-  String _rng(dynamic a, dynamic b) {
-    final lo = (a is num) ? a.toDouble() : double.tryParse('$a');
-    final hi = (b is num) ? b.toDouble() : double.tryParse('$b');
-    if (lo == null || hi == null) return '';
-    final l = lo % 1 == 0 ? lo.toStringAsFixed(0) : lo.toString();
-    final h = hi % 1 == 0 ? hi.toStringAsFixed(0) : hi.toString();
-    return '$l – $h';
-  }
-
-  String _buildDetailsNarration(List<Map<String, dynamic>> parsed) {
-    final pos = parsed.where((m) => m['flag'] == 'positive').toList();
-    final highs = parsed.where((m) => m['flag'] == 'high').toList();
-    final lows = parsed.where((m) => m['flag'] == 'low').toList();
-    final normals = parsed.where((m) => m['flag'] == 'normal').take(5).toList();
-
-    final buf = StringBuffer();
-    if (pos.isNotEmpty) {
-      buf.writeln('Pozitif saptanan testler:');
-      for (final t in pos) {
-        buf.writeln('${t['name']}: ${_fmt(t['value'])} ${t['unit'] ?? ''}.');
-      }
-    }
-    if (highs.isNotEmpty) {
-      buf.writeln('Yüksek değerler:');
-      for (final t in highs) {
-        buf.writeln('${t['name']}: ${_fmt(t['value'])} ${t['unit'] ?? ''}. '
-            'Referans aralığı ${_rng(t['refLow'], t['refHigh'])} ${t['unit'] ?? ''}.');
-      }
-    }
-    if (lows.isNotEmpty) {
-      buf.writeln('Düşük değerler:');
-      for (final t in lows) {
-        buf.writeln('${t['name']}: ${_fmt(t['value'])} ${t['unit'] ?? ''}. '
-            'Referans aralığı ${_rng(t['refLow'], t['refHigh'])} ${t['unit'] ?? ''}.');
-      }
-    }
-    if (pos.isEmpty && highs.isEmpty && lows.isEmpty) {
-      buf.writeln('Tüm testler referans aralığında.');
-    }
-    if (normals.isNotEmpty) {
-      buf.writeln('Örnek normal değerler:');
-      for (final t in normals) {
-        buf.writeln('${t['name']}: ${_fmt(t['value'])} ${_unit(t)}. '
-            'Referans ${_rng(t['refLow'], t['refHigh'])} ${_unit(t)}.');
-      }
-    }
-    return buf.toString();
-  }
-
-  String _unit(Map<String, dynamic> m) => (m['unit'] ?? '').toString();
 }
 
-// ==================== CUSTOM WIDGETS ====================
+// ====== Model ======
+enum LabFlag { high, low, normal, unknown }
 
+class LabItem {
+  LabItem({
+    required this.name,
+    this.valueStr,
+    this.value,
+    this.unit,
+    this.refLow,
+    this.refHigh,
+    this.flag = LabFlag.unknown,
+  });
+
+  String name;
+  String? valueStr; // "< 0.008" gibi
+  double? value;
+  String? unit;
+  double? refLow;
+  double? refHigh;
+  LabFlag flag;
+}
+
+// ====== Glass UI parçaları ======
 class _GlassCard extends StatelessWidget {
   final Widget child;
-  final Color? color;
-  final Color? borderColor;
-
-  const _GlassCard({required this.child, this.color, this.borderColor});
+  const _GlassCard({required this.child});
 
   @override
   Widget build(BuildContext context) {
@@ -706,11 +761,14 @@ class _GlassCard extends StatelessWidget {
       child: BackdropFilter(
         filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
         child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 6),
           decoration: BoxDecoration(
-            color: color ?? Colors.white.withOpacity(0.1),
+            color: Colors.white.withOpacity(0.08),
             borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: borderColor ?? Colors.white.withOpacity(0.2), width: 1),
-            boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 12, offset: Offset(0, 6))],
+            border: Border.all(color: Colors.white.withOpacity(0.22), width: 1),
+            boxShadow: const [
+              BoxShadow(color: Colors.black26, blurRadius: 12, offset: Offset(0, 6)),
+            ],
           ),
           child: child,
         ),
@@ -732,124 +790,23 @@ class _GlassButton extends StatelessWidget {
       borderRadius: BorderRadius.circular(16),
       child: BackdropFilter(
         filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-        child: Container(
-          decoration: BoxDecoration(
-            color: isPrimary ? Colors.white.withOpacity(0.2) : Colors.white.withOpacity(0.1),
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: isPrimary ? Colors.white.withOpacity(0.3) : Colors.white.withOpacity(0.2)),
-          ),
-          child: Material(
-            color: Colors.transparent,
-            child: InkWell(
-              onTap: onPressed,
-              borderRadius: BorderRadius.circular(16),
-              child: Container(padding: const EdgeInsets.all(12), child: child),
+        child: Material(
+          color: (isPrimary ? Colors.white.withOpacity(0.22) : Colors.white.withOpacity(0.12)),
+          child: InkWell(
+            onTap: onPressed,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: isPrimary ? Colors.white.withOpacity(0.35) : Colors.white.withOpacity(0.25),
+                ),
+              ),
+              child: child,
             ),
           ),
         ),
       ),
-    );
-  }
-}
-
-class _AnalysisPreview extends StatelessWidget {
-  final String summary;
-  final List<Map<String, dynamic>> parsed;
-
-  const _AnalysisPreview({required this.summary, required this.parsed});
-
-  Color _flagColor(String f) {
-    switch (f) {
-      case 'high':
-        return Colors.redAccent;
-      case 'low':
-        return Colors.orange;
-      case 'positive':
-        return Colors.purple;
-      case 'borderline':
-        return Colors.pink;
-      case 'normal':
-        return Colors.greenAccent;
-      default:
-        return Colors.grey;
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.1),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: Colors.white.withOpacity(0.2)),
-          ),
-          child: Text(summary, style: const TextStyle(color: Colors.white, fontSize: 16, height: 1.4)),
-        ),
-        const SizedBox(height: 16),
-        if (parsed.isNotEmpty) ...[
-          const Text('Test Detayları:',
-              style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 8),
-          Container(
-            constraints: const BoxConstraints(maxHeight: 200),
-            decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.05),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: Colors.white.withOpacity(0.1)),
-            ),
-            child: ListView.builder(
-              shrinkWrap: true,
-              itemCount: parsed.length,
-              itemBuilder: (_, i) {
-                final m = parsed[i];
-                return Container(
-                  margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.05),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Row(
-                    children: [
-                      Container(
-                        width: 8,
-                        height: 8,
-                        decoration: BoxDecoration(color: _flagColor(m['flag'] as String), shape: BoxShape.circle),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(m['name'] as String,
-                                style: const TextStyle(
-                                    color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14)),
-                            const SizedBox(height: 2),
-                            Text(
-                              [
-                                if (m['value'] != null && '${m['value']}'.isNotEmpty)
-                                  'Değer: ${m['value']} ${m['unit'] ?? ''}',
-                                if (m['refLow'] != null && m['refHigh'] != null)
-                                  'Ref: ${m['refLow']}–${m['refHigh']} ${m['unit'] ?? ''}',
-                              ].join(' • '),
-                              style: TextStyle(color: Colors.white.withOpacity(0.8), fontSize: 12),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              },
-            ),
-          ),
-        ],
-      ],
     );
   }
 }
